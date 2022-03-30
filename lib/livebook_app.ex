@@ -1,77 +1,62 @@
 if Mix.target() == :app do
+  defmodule LivebookApp.WxUtils do
+    @moduledoc false
+
+    def wxID_EXIT(), do: 5006
+    def wxID_OSX_HIDE(), do: 5250
+
+    def fixup_macos_menubar(menubar, app_name) do
+      menu = :wxMenuBar.oSXGetAppleMenu(menubar)
+
+      # without this, for some reason setting the title later will make it non-bold
+      :wxMenu.getTitle(menu)
+
+      # this is useful in dev, not needed when bundled in .app
+      :wxMenu.setTitle(menu, app_name)
+
+      menu
+      |> :wxMenu.findItem(wxID_OSX_HIDE())
+      |> :wxMenuItem.setItemLabel("Hide #{app_name}\tCtrl+H")
+
+      menu
+      |> :wxMenu.findItem(wxID_EXIT())
+      |> :wxMenuItem.setItemLabel("Quit #{app_name}\tCtrl+Q")
+    end
+
+    def os() do
+      case :os.type() do
+        {:unix, :darwin} -> :macos
+        {:win32, _} -> :windows
+      end
+    end
+  end
+
   defmodule LivebookApp do
     @moduledoc false
 
-    @behaviour :wx_object
+    @wxID_EXIT LivebookApp.WxUtils.wxID_EXIT()
 
-    # https://github.com/erlang/otp/blob/OTP-24.1.2/lib/wx/include/wx.hrl#L1314
-    @wx_id_exit 5006
-    @wx_id_osx_hide 5250
+    use GenServer
+    require Logger
 
-    def start_link(_) do
-      {:wx_ref, _, _, pid} = :wx_object.start_link(__MODULE__, [], [])
-      {:ok, pid}
-    end
-
-    def child_spec(init_arg) do
-      %{
-        id: __MODULE__,
-        start: {__MODULE__, :start_link, [init_arg]},
-        restart: :transient
-      }
-    end
-
-    def windows_connected(url) do
-      url
-      |> String.trim()
-      |> String.trim_leading("\"")
-      |> String.trim_trailing("\"")
-      |> windows_to_wx()
+    def start_link(arg) do
+      GenServer.start_link(__MODULE__, arg, name: __MODULE__)
     end
 
     @impl true
     def init(_) do
-      app_name = "Livebook"
-
-      true = Process.register(self(), __MODULE__)
-      os = os()
-
-      # TODO: on all platforms either add a basic window with some buttons OR a wxwebview
-      size = if os == :macos, do: {0, 0}, else: {100, 100}
-
+      IO.inspect(:init)
       wx = :wx.new()
-      frame = :wxFrame.new(wx, -1, app_name, size: size)
-      :wxFrame.show(frame)
 
-      if os == :macos do
-        fixup_macos_menubar(frame, app_name)
-      end
+      menubar = :wxMenuBar.macGetCommonMenuBar()
+      IO.inspect(menubar)
+      LivebookApp.WxUtils.fixup_macos_menubar(menubar, "Livebook")
+      :wxMenuBar.connect(menubar, :command_menu_selected, skip: true)
 
-      :wxFrame.connect(frame, :command_menu_selected, skip: true)
-      :wxFrame.connect(frame, :close_window, skip: true)
+      {:ok, pid} = LivebookApp.Window.start_link(wx)
+      ref = Process.monitor(pid)
 
-      case os do
-        :macos ->
-          :wx.subscribe_events()
-
-        :windows ->
-          windows_to_wx(System.get_env("LIVEBOOK_URL") || "")
-      end
-
-      state = %{frame: frame}
-      {frame, state}
-    end
-
-    @impl true
-    def handle_event({:wx, @wx_id_exit, _, _, _}, state) do
-      :init.stop()
-      {:stop, :shutdown, state}
-    end
-
-    @impl true
-    def handle_event({:wx, _, _, _, {:wxClose, :close_window}}, state) do
-      :init.stop()
-      {:stop, :shutdown, state}
+      {:ok, %{windows: %{ref => pid}}}
     end
 
     # This event is triggered when the application is opened for the first time
@@ -81,10 +66,6 @@ if Mix.target() == :app do
       {:noreply, state}
     end
 
-    # TODO: investigate "Universal Links" [1], that is, instead of livebook://foo, we have
-    # https://livebook.dev/foo, which means the link works with and without Livebook.app.
-    #
-    # [1] https://developer.apple.com/documentation/xcode/allowing-apps-and-websites-to-link-to-your-content
     @impl true
     def handle_info({:open_url, 'livebook://' ++ rest}, state) do
       "https://#{rest}"
@@ -110,41 +91,104 @@ if Mix.target() == :app do
       {:noreply, state}
     end
 
-    # ignore other events
     @impl true
-    def handle_info(_event, state) do
+    def handle_info({:wx, @wxID_EXIT, _, _, _}, _state) do
+      System.stop(0)
+    end
+
+    @impl true
+    def handle_info({:wx, _, _, _, _} = event, state) do
+      Logger.debug(inspect(event))
       {:noreply, state}
     end
 
-    # 1. WxeApp attaches event handler to "Quit" menu item that does nothing (to not accidentally bring
-    #    down the VM). Let's create a fresh menu bar without that caveat.
-    # 2. Fix app name
+    @impl true
+    def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+      state = update_in(state.windows, &Map.delete(&1, ref))
+      {:noreply, state}
+    end
+  end
+
+  defmodule LivebookApp.Window do
+    @moduledoc false
+
+    @behaviour :wx_object
+
+    @wxID_EXIT LivebookApp.WxUtils.wxID_EXIT()
+
+    require Logger
+
+    def start_link(wx) do
+      {:wx_ref, _, _, pid} = :wx_object.start_link(__MODULE__, wx, [])
+      {:ok, pid}
+    end
+
+    def child_spec(init_arg) do
+      %{
+        id: __MODULE__,
+        start: {__MODULE__, :start_link, [init_arg]},
+        restart: :transient
+      }
+    end
+
+    def windows_connected(url) do
+      url
+      |> String.trim()
+      |> String.trim_leading("\"")
+      |> String.trim_trailing("\"")
+      |> windows_to_wx()
+    end
+
+    @impl true
+    def init(wx) do
+      app_name = "Livebook"
+      os = LivebookApp.WxUtils.os()
+
+      size = {500, 500}
+      frame = :wxFrame.new(wx, -1, app_name, size: size)
+      :wxFrame.show(frame)
+
+      if os == :macos do
+        fixup_macos_menubar(frame, app_name)
+      end
+
+      :wxFrame.connect(frame, :command_menu_selected, skip: true)
+      :wxFrame.connect(frame, :close_window, skip: true)
+
+      case os do
+        :macos ->
+          :wx.subscribe_events()
+
+        :windows ->
+          windows_to_wx(System.get_env("LIVEBOOK_URL") || "")
+      end
+
+      state = %{frame: frame}
+      {frame, state}
+    end
+
+    @impl true
+    def handle_event({:wx, @wxID_EXIT, _, _, _}, _state) do
+      System.stop()
+    end
+
+    @impl true
+    def handle_event({:wx, _, _, _, {:wxClose, :close_window}}, state) do
+      {:noreply, state}
+    end
+
+    @impl true
+    def handle_event(event, state) do
+      Logger.debug(inspect(event))
+      {:noreply, state}
+    end
+
+    # WxeApp attaches event handler to "Quit" menu item that does nothing (to not accidentally bring
+    # down the VM). Let's create a fresh menu bar without that caveat.
     defp fixup_macos_menubar(frame, app_name) do
       menubar = :wxMenuBar.new()
       :wxFrame.setMenuBar(frame, menubar)
-
-      menu = :wxMenuBar.oSXGetAppleMenu(menubar)
-
-      # without this, for some reason setting the title later will make it non-bold
-      :wxMenu.getTitle(menu)
-
-      # this is useful in dev, not needed when bundled in .app
-      :wxMenu.setTitle(menu, app_name)
-
-      menu
-      |> :wxMenu.findItem(@wx_id_osx_hide)
-      |> :wxMenuItem.setItemLabel("Hide #{app_name}\tCtrl+H")
-
-      menu
-      |> :wxMenu.findItem(@wx_id_exit)
-      |> :wxMenuItem.setItemLabel("Quit #{app_name}\tCtrl+Q")
-    end
-
-    defp os() do
-      case :os.type() do
-        {:unix, :darwin} -> :macos
-        {:win32, _} -> :windows
-      end
+      LivebookApp.WxUtils.fixup_macos_menubar(menubar, app_name)
     end
 
     defp windows_to_wx("") do
