@@ -1,0 +1,4 @@
+[info] Running LivebookWeb.Endpoint with cowboy 2.9.0 at 127.0.0.1:4000 (http)
+:dev
+[Livebook] Application running at http://localhost:4000/
+{:new_file, []}
