@@ -3,6 +3,7 @@ if Mix.target() == :app do
     @moduledoc false
 
     defmacro wxID_ANY(), do: -1
+    defmacro wxID_OPEN(), do: 5000
     defmacro wxID_CLOSE(), do: 5001
     defmacro wxID_NEW(), do: 5002
     defmacro wxID_EXIT(), do: 5006
@@ -72,7 +73,7 @@ if Mix.target() == :app do
       menubar("Livebook", [
         {"File",
          [
-           "Open in Browser\tctrl+o",
+           {"Open in Browser", id: wxID_OPEN()},
            {"New Window\tctrl+shift+n", id: wxID_NEW()},
            {"Close Window\tctrl+w", id: wxID_CLOSE()}
          ]}
@@ -170,12 +171,12 @@ if Mix.target() == :app do
       :wxMenuBar.connect(mb, :command_menu_selected, skip: true)
       :wxFrame.show(f)
       url = LivebookWeb.Endpoint.access_url()
-      # url = "http://livebeats.fly.dev"
-      # url = "http://localhost:4001/dashboard/home"
       # url = "https://elixir-lang.org"
       webview = :wxWebView.new(f, -1, url: url, size: size)
+      :wxWebView.connect(webview, :webview_loaded)
+      :wxWebView.connect(webview, :webview_navigating)
       :wxWebView.connect(webview, :webview_title_changed)
-      state = %{frame: f}
+      state = %{frame: f, webview: webview}
       {f, state}
     end
 
@@ -199,6 +200,30 @@ if Mix.target() == :app do
 
     @impl true
     def handle_event({:wx, _, _, _, {:wxClose, :close_window}}, state) do
+      {:noreply, state}
+    end
+
+    @impl true
+    def handle_event({:wx, _, _, _, {:wxWebView, :webview_loaded, _, _, _, _}}, state) do
+      js = """
+      var handleDocumentKeyDown = function(event) {
+        const isMacOS = /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform);
+        const cmd = isMacOS ? event.metaKey : event.ctrlKey;
+        const shift = event.shiftKey;
+        const key = event.key;
+
+        if (cmd && key === "q") {
+          window.location.replace('http://wx/quit');
+        } else if (cmd && key === "w") {
+          alert("close_window");
+        } else if (cmd && shift && key === "n") {
+          alert("new_window");
+        }
+      }
+      document.addEventListener("keydown", handleDocumentKeyDown);
+      """
+
+      {true, _} = :wxWebView.runScript(state.webview, js)
       {:noreply, state}
     end
 
