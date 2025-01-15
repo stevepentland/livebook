@@ -12,13 +12,86 @@ export function isEditableElement(element) {
   );
 }
 
-export function isElementInViewport(element) {
+export function isElementInViewport(element, proximity = 0) {
   const box = element.getBoundingClientRect();
-  return box.bottom >= 0 && box.top <= window.innerHeight;
+  return box.bottom >= -proximity && box.top <= window.innerHeight + proximity;
 }
 
 export function isElementHidden(element) {
   return element.offsetParent === null;
+}
+
+export function waitUntilVisible(element) {
+  let observer = null;
+
+  return new Promise((resolve, reject) => {
+    if (isElementHidden(element)) {
+      observer = new ResizeObserver((entries) => {
+        if (!isElementHidden(element)) {
+          observer.disconnect();
+          resolve();
+        }
+      });
+      observer.observe(element);
+    } else {
+      resolve();
+    }
+  });
+}
+
+/**
+ * Returns a promise that resolves when the element enters the viewport.
+ *
+ * ## Options
+ *
+ *   * `root` - a scrollable ancestor that should be used for observing
+ *     the intersection, instead of the viewport
+ *
+ *   * `proximity` - the number of pixels around `root` used to expand
+ *     the intersection box, which effectively resolves the promise when
+ *     `element` is in certain proximity of the viewport. Note that if
+ *     the element is inside a scrollable ancestor, the ancestor must
+ *     be set as `root`.
+ *
+ *     > NOTE: rootMargin only applies to the intersection root itself.
+ *     > If a target Element is clipped by an ancestor other than the
+ *     > intersection root, that clipping is unaffected by rootMargin.
+ *     > ~ https://w3c.github.io/IntersectionObserver
+ *
+ */
+export function waitUntilInViewport(
+  element,
+  { root = null, proximity = 0 } = {},
+) {
+  let observer = null;
+
+  const promise = new Promise((resolve, reject) => {
+    if (isElementVisibleInViewport(element, proximity)) {
+      resolve();
+    } else {
+      observer = new IntersectionObserver(
+        (entries) => {
+          if (entries[0].isIntersecting) {
+            observer.disconnect();
+            observer = null;
+            resolve();
+          }
+        },
+        { root, rootMargin: `${proximity}px` },
+      );
+      observer.observe(element);
+    }
+  });
+
+  const cancel = () => {
+    observer && observer.disconnect();
+  };
+
+  return { promise, cancel };
+}
+
+export function isElementVisibleInViewport(element, proximity = 0) {
+  return !isElementHidden(element) && isElementInViewport(element, proximity);
 }
 
 export function clamp(n, x, y) {
@@ -153,7 +226,7 @@ export function setFavicon(name) {
     document.head.appendChild(link);
   }
 
-  link.href = `/${name}.svg`;
+  link.href = `/favicons/${name}.svg`;
 }
 
 export function findChildOrThrow(element, selector) {
@@ -161,7 +234,7 @@ export function findChildOrThrow(element, selector) {
 
   if (!child) {
     throw new Error(
-      `expected a child matching ${selector}, but none was found`
+      `expected a child matching ${selector}, but none was found`,
     );
   }
 
@@ -188,4 +261,96 @@ const htmlEscapes = {
  */
 export function escapeHtml(string) {
   return (string || "").replace(/[&<>"']/g, (char) => htmlEscapes[char]);
+}
+
+/**
+ * Encodes the given binary buffer into base64 string.
+ */
+export function bufferToBase64(buffer) {
+  let binaryString = "";
+  const bytes = new Uint8Array(buffer);
+  const length = bytes.byteLength;
+
+  for (let i = 0; i < length; i++) {
+    binaryString += String.fromCharCode(bytes[i]);
+  }
+
+  return btoa(binaryString);
+}
+
+/**
+ * Decodes a base64 string into a binary buffer.
+ */
+export function base64ToBuffer(base64) {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  const length = bytes.byteLength;
+
+  for (let i = 0; i < length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  return bytes.buffer;
+}
+
+export function isFeatureFlagEnabled(feature) {
+  const features = document
+    .querySelector("body")
+    .getAttribute("data-feature-flags", "");
+
+  if (features.legnth === 0) {
+    return false;
+  } else {
+    return features.split(",").includes(feature);
+  }
+}
+
+export function cookieOptions() {
+  if (document.body.hasAttribute("data-within-iframe")) {
+    return ";SameSite=None;Secure";
+  } else {
+    return ";SameSite=Lax";
+  }
+}
+
+/**
+ * Removes `key` from `object` and returns the associated value and
+ * the updated object.
+ */
+export function pop(object, key, defaultValue = undefined) {
+  if (object.hasOwnProperty(key)) {
+    const { [key]: value, ...newObject } = object;
+    return [value, newObject];
+  }
+
+  return [defaultValue, object];
+}
+
+export function wait(milliseconds) {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => resolve(), milliseconds);
+  });
+}
+
+export function isSafari() {
+  return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+}
+
+/**
+ * Alters element style with the given properties for the callback
+ * execution.
+ *
+ * After the callback is executed, the initial style is restored.
+ */
+export function withStyle(element, style, callback) {
+  const initialStyle = {};
+
+  for (const key in style) {
+    initialStyle[key] = element.style[key];
+    element.style[key] = style[key];
+  }
+
+  callback();
+
+  Object.assign(element.style, initialStyle);
 }

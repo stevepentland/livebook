@@ -11,11 +11,13 @@ import rehypeParse from "rehype-parse";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeStringify from "rehype-stringify";
 
+import "katex/contrib/copy-tex";
+
 import { visit } from "unist-util-visit";
 import { toText } from "hast-util-to-text";
 import { removePosition } from "unist-util-remove-position";
 
-import { highlight } from "../hooks/cell_editor/live_editor/monaco";
+import { highlight } from "../hooks/cell_editor/live_editor/highlight";
 import { renderMermaid } from "./markdown/mermaid";
 import { escapeHtml } from "../lib/utils";
 
@@ -23,22 +25,39 @@ import { escapeHtml } from "../lib/utils";
  * Renders markdown content in the given container.
  */
 class Markdown {
-  constructor(container, content, { baseUrl = null, emptyText = "" } = {}) {
+  constructor(
+    container,
+    content,
+    {
+      baseUrl = null,
+      defaultCodeLanguage = null,
+      emptyText = "",
+      allowedUriSchemes = [],
+      useDarkTheme = false,
+    } = {},
+  ) {
     this.container = container;
     this.content = content;
     this.baseUrl = baseUrl;
+    this.defaultCodeLanguage = defaultCodeLanguage;
     this.emptyText = emptyText;
+    this.allowedUriSchemes = allowedUriSchemes;
+    this.useDarkTheme = useDarkTheme;
 
-    this._render();
+    this.render();
   }
 
+  /**
+   * Sets new markdown content to be rendered in the container.
+   */
   setContent(content) {
     this.content = content;
-    this._render();
+    this.render();
   }
 
-  _render() {
-    this._getHtml().then((html) => {
+  /** @private */
+  render() {
+    this.getHtml().then((html) => {
       // Wrap the HTML in another element, so that we
       // can use morphdom's childrenOnly option
       const wrappedHtml = `<div>${html}</div>`;
@@ -46,23 +65,34 @@ class Markdown {
     });
   }
 
-  _getHtml() {
+  /** @private */
+  getHtml() {
     return (
       unified()
         .use(remarkParse)
         .use(remarkGfm)
         .use(remarkMath)
         .use(remarkPrepareMermaid)
-        .use(remarkSyntaxHiglight, { highlight })
-        .use(remarkExpandUrls, { baseUrl: this.baseUrl })
+        .use(remarkSyntaxHiglight, {
+          highlight,
+          defaultLanguage: this.defaultCodeLanguage,
+        })
         // We keep the HTML nodes, parse with rehype-raw and then sanitize
         .use(remarkRehype, { allowDangerousHtml: true })
         .use(rehypeRaw)
-        .use(rehypeSanitize, sanitizeSchema())
+        .use(rehypeExpandUrls, { baseUrl: this.baseUrl })
+        .use(rehypeSanitize, sanitizeSchema(this.allowedUriSchemes))
         .use(rehypeKatex)
-        .use(rehypeMermaid)
-        .use(rehypeExternalLinks)
-        .use(rehypeStringify)
+        .use(rehypeMermaid, { useDarkTheme: this.useDarkTheme })
+        .use(rehypeExternalLinks, { baseUrl: this.baseUrl })
+        .use(rehypeStringify, {
+          // Mermaid allows HTML tags, such as <br /> in diagram labels.
+          // We parse the SVG earlier, then stringify it, closeEmptyElements
+          // makes sure we emit <br /> as a self-closing tag, rather than
+          // <br></br> (which the browser would interpret as two breaks).
+          // See https://github.com/syntax-tree/hast-util-to-html/blob/9d7a2f7d63ec2d11b3ae5a5e4201181fdeedf6ea/lib/handle/element.js#L66-L69
+          closeEmptyElements: true,
+        })
         .process(this.content)
         .then((file) => String(file))
         .catch((error) => {
@@ -87,14 +117,19 @@ export default Markdown;
 
 // Plugins
 
-function sanitizeSchema() {
+function sanitizeSchema(allowedUriSchemes) {
   // Allow class and style attributes on tags for syntax highlighting,
   // remarkMath tags, or user-written styles
+
   return {
     ...defaultSchema,
     attributes: {
       ...defaultSchema.attributes,
       "*": [...(defaultSchema.attributes["*"] || []), "className", "style"],
+    },
+    protocols: {
+      ...defaultSchema.protocols,
+      href: [...defaultSchema.protocols.href, ...allowedUriSchemes],
     },
   };
 }
@@ -105,13 +140,15 @@ function remarkSyntaxHiglight(options) {
     const promises = [];
 
     visit(ast, "code", (node) => {
-      if (node.lang) {
+      const language = node.lang || options.defaultLanguage;
+
+      if (language) {
         function updateNode(html) {
           node.type = "html";
           node.value = `<pre><code>${html}</code></pre>`;
         }
 
-        const result = options.highlight(node.value, node.lang);
+        const result = options.highlight(node.value, language);
 
         if (result && typeof result.then === "function") {
           const promise = Promise.resolve(result).then(updateNode);
@@ -128,27 +165,38 @@ function remarkSyntaxHiglight(options) {
 
 // Expands relative URLs against the given base url
 // and deals with ".." in URLs
-function remarkExpandUrls(options) {
+function rehypeExpandUrls(options) {
   return (ast) => {
     if (options.baseUrl) {
-      visit(ast, "link", (node) => {
-        if (node.url && !isAbsoluteUrl(node.url) && !isPageAnchor(node.url)) {
-          node.url = urlAppend(options.baseUrl, node.url);
-        }
-      });
+      visit(ast, "element", (node) => {
+        if (node.tagName === "a" && node.properties) {
+          const url = node.properties.href;
 
-      visit(ast, "image", (node) => {
-        if (node.url && !isAbsoluteUrl(node.url)) {
-          node.url = urlAppend(options.baseUrl, node.url);
+          if (
+            url &&
+            !isAbsoluteUrl(url) &&
+            !isInternalUrl(url) &&
+            !isPageAnchor(url)
+          ) {
+            node.properties.href = urlAppend(options.baseUrl, url);
+          }
+        }
+
+        if (node.tagName === "img" && node.properties) {
+          const url = node.properties.src;
+
+          if (url && !isAbsoluteUrl(url) && !isInternalUrl(url)) {
+            node.properties.src = urlAppend(options.baseUrl, url);
+          }
         }
       });
     }
 
     // Browser normalizes URLs with ".." so we use a "__parent__"
     // modifier instead and handle it on the server
-    visit(ast, "link", (node) => {
-      if (node.url) {
-        node.url = node.url
+    visit(ast, "element", (node) => {
+      if (node.tagName === "a" && node.properties && node.properties.href) {
+        node.properties.href = node.properties.href
           .split("/")
           .map((part) => (part === ".." ? "__parent__" : part))
           .join("/");
@@ -164,7 +212,9 @@ function remarkPrepareMermaid(options) {
     visit(ast, "code", (node, index, parent) => {
       if (node.lang === "mermaid") {
         node.type = "html";
-        node.value = `<div class="mermaid">${escapeHtml(node.value)}</div>`;
+        node.value = `
+          <div class="mermaid">${escapeHtml(node.value)}</div>
+        `;
       }
     });
   };
@@ -182,14 +232,14 @@ function rehypeMermaid(options) {
 
       if (classes.includes("mermaid")) {
         function updateNode(html) {
-          element.children = removePosition(
-            parseHtml.parse(html),
-            true
-          ).children;
+          const ast = parseHtml.parse(html);
+          removePosition(ast, true);
+          element.children = ast.children;
         }
 
         const value = toText(element, { whitespace: "pre" });
-        const promise = renderMermaid(value).then(updateNode);
+        const theme = options.useDarkTheme ? "dark" : "default";
+        const promise = renderMermaid(value, { theme }).then(updateNode);
         promises.push(promise);
       }
     });
@@ -206,7 +256,10 @@ function rehypeExternalLinks(options) {
         const url = node.properties.href;
 
         if (isInternalUrl(url)) {
-          node.properties["data-phx-link"] = "redirect";
+          node.properties["data-phx-link"] =
+            options.baseUrl && url.startsWith(options.baseUrl)
+              ? "patch"
+              : "redirect";
           node.properties["data-phx-link-state"] = "push";
         } else if (isAbsoluteUrl(url)) {
           node.properties.target = "_blank";
@@ -218,7 +271,7 @@ function rehypeExternalLinks(options) {
 }
 
 function isAbsoluteUrl(url) {
-  return url.startsWith("http") || url.startsWith("/");
+  return /^(?:[a-z]+:)?\/\//i.test(url);
 }
 
 function isPageAnchor(url) {

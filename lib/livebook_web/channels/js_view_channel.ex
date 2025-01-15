@@ -1,17 +1,30 @@
 defmodule LivebookWeb.JSViewChannel do
   use Phoenix.Channel
 
+  alias LivebookWeb.CodecHelpers
+
   @impl true
-  def join("js_view", %{"session_id" => session_id}, socket) do
-    {:ok, assign(socket, session_id: session_id, ref_with_info: %{})}
+  def join("js_view", %{"session_token" => session_token}, socket) do
+    case Phoenix.Token.verify(LivebookWeb.Endpoint, "session", session_token) do
+      {:ok, data} ->
+        {:ok,
+         assign(socket,
+           session_id: data.session_id,
+           client_id: data.client_id,
+           ref_with_info: %{}
+         )}
+
+      _error ->
+        {:error, %{reason: "invalid token"}}
+    end
   end
 
   @impl true
-  def handle_in("connect", %{"session_token" => session_token, "ref" => ref, "id" => id}, socket) do
-    {:ok, data} = Phoenix.Token.verify(LivebookWeb.Endpoint, "js view", session_token)
-    %{pid: pid} = data
+  def handle_in("connect", %{"connect_token" => connect_token, "ref" => ref, "id" => id}, socket) do
+    {:ok, %{pid: pid}} =
+      Phoenix.Token.verify(LivebookWeb.Endpoint, "js-view-connect", connect_token)
 
-    send(pid, {:connect, self(), %{origin: self(), ref: ref}})
+    send(pid, {:connect, self(), %{origin: socket.assigns.client_id, ref: ref}})
 
     socket =
       update_in(socket.assigns.ref_with_info[ref], fn
@@ -34,30 +47,40 @@ defmodule LivebookWeb.JSViewChannel do
 
   def handle_in("event", raw, socket) do
     {[event, ref], payload} = transport_decode!(raw)
-    pid = socket.assigns.ref_with_info[ref].pid
-    send(pid, {:event, event, payload, %{origin: self(), ref: ref}})
+
+    with %{^ref => info} <- socket.assigns.ref_with_info do
+      send(info.pid, {:event, event, payload, %{origin: socket.assigns.client_id, ref: ref}})
+    end
+
     {:noreply, socket}
   end
 
   def handle_in("ping", %{"ref" => ref}, socket) do
-    pid = socket.assigns.ref_with_info[ref].pid
-    send(pid, {:ping, self(), nil, %{ref: ref}})
+    with %{^ref => info} <- socket.assigns.ref_with_info do
+      send(info.pid, {:ping, self(), nil, %{ref: ref}})
+    end
+
     {:noreply, socket}
   end
 
   def handle_in("disconnect", %{"ref" => ref}, socket) do
     socket =
-      if socket.assigns.ref_with_info[ref].count == 1 do
-        Livebook.Session.unsubscribe_from_runtime_events(
-          socket.assigns.session_id,
-          "js_live",
-          ref
-        )
+      case socket.assigns.ref_with_info do
+        %{^ref => %{count: 1}} ->
+          Livebook.Session.unsubscribe_from_runtime_events(
+            socket.assigns.session_id,
+            "js_live",
+            ref
+          )
 
-        {_, socket} = pop_in(socket.assigns.ref_with_info[ref])
-        socket
-      else
-        update_in(socket.assigns.ref_with_info[ref], &%{&1 | count: &1.count - 1})
+          {_, socket} = pop_in(socket.assigns.ref_with_info[ref])
+          socket
+
+        %{^ref => %{count: count}} when count > 1 ->
+          update_in(socket.assigns.ref_with_info[ref], &%{&1 | count: &1.count - 1})
+
+        %{} ->
+          socket
       end
 
     {:noreply, socket}
@@ -77,6 +100,15 @@ defmodule LivebookWeb.JSViewChannel do
     with {:error, error} <- try_push(socket, "init:#{ref}:#{id}", nil, payload) do
       message = "Failed to serialize initial widget data, " <> error
       push(socket, "error:#{ref}", %{"message" => message, "init" => true})
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:event, event, payload, %{ref: ref}}, socket) do
+    with {:error, error} <- try_push(socket, "event:#{ref}", [event], payload) do
+      message = "Failed to serialize widget data, " <> error
+      push(socket, "error:#{ref}", %{"message" => message})
     end
 
     {:noreply, socket}
@@ -105,12 +137,15 @@ defmodule LivebookWeb.JSViewChannel do
   defp run_safely(fun) do
     try do
       {:ok, fun.()}
-    catch
-      :error, %Protocol.UndefinedError{protocol: Jason.Encoder, value: value} ->
-        {:error, "value #{inspect(value)} is not JSON-serializable, use another data type"}
+    rescue
+      error ->
+        case error do
+          %Protocol.UndefinedError{protocol: JSON.Encoder, value: value} ->
+            {:error, "value #{inspect(value)} is not JSON-serializable, use another data type"}
 
-      :error, error ->
-        {:error, Exception.message(error)}
+          error ->
+            {:error, Exception.message(error)}
+        end
     end
   end
 
@@ -131,7 +166,7 @@ defmodule LivebookWeb.JSViewChannel do
   # payload accordingly
 
   defp transport_encode!(meta, {:binary, info, binary}) do
-    {:binary, encode!([meta, info], binary)}
+    {:binary, CodecHelpers.encode_annotated_binary!([meta, info], binary)}
   end
 
   defp transport_encode!(meta, payload) do
@@ -139,24 +174,12 @@ defmodule LivebookWeb.JSViewChannel do
   end
 
   defp transport_decode!({:binary, raw}) do
-    {[meta, info], binary} = decode!(raw)
+    {[meta, info], binary} = CodecHelpers.decode_annotated_binary!(raw)
     {meta, {:binary, info, binary}}
   end
 
   defp transport_decode!(raw) do
     %{"root" => [meta, payload]} = raw
     {meta, payload}
-  end
-
-  defp encode!(meta, binary) do
-    meta = Jason.encode!(meta)
-    meta_size = byte_size(meta)
-    <<meta_size::size(32), meta::binary, binary::binary>>
-  end
-
-  defp decode!(raw) do
-    <<meta_size::size(32), meta::binary-size(meta_size), binary::binary>> = raw
-    meta = Jason.decode!(meta)
-    {meta, binary}
   end
 end

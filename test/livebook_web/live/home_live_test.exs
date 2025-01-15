@@ -2,21 +2,23 @@ defmodule LivebookWeb.HomeLiveTest do
   use LivebookWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
+  import Livebook.SessionHelpers
+  import Livebook.TestHelpers
 
   alias Livebook.{Sessions, Session}
 
   test "disconnected and connected render", %{conn: conn} do
-    {:ok, view, disconnected_html} = live(conn, "/")
+    {:ok, view, disconnected_html} = live(conn, ~p"/")
     assert disconnected_html =~ "Running sessions"
     assert render(view) =~ "Running sessions"
   end
 
   test "redirects to session upon creation", %{conn: conn} do
-    {:ok, view, _} = live(conn, "/")
+    {:ok, view, _} = live(conn, ~p"/")
 
     assert {:error, {:live_redirect, %{to: to}}} =
              view
-             |> element(~s/[role="navigation"] button/, "New notebook")
+             |> element(~s/[role="navigation"] a/, "New notebook")
              |> render_click()
 
     assert to =~ "/sessions/"
@@ -24,95 +26,13 @@ defmodule LivebookWeb.HomeLiveTest do
     close_session_by_path(to)
   end
 
-  describe "file selection" do
-    test "updates the list of files as the input changes", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/")
+  test "public new endpoint creates an empty session", %{conn: conn} do
+    assert {:error, {:live_redirect, %{to: to}}} = result = live(conn, ~p"/new")
+    {:ok, view, _} = follow_redirect(result, conn)
 
-      path = Path.expand("../../../lib", __DIR__) <> "/"
+    assert render(view) =~ "Untitled notebook"
 
-      view
-      |> element(~s{form[phx-change="set_path"]})
-      |> render_change(%{path: path})
-
-      # Render the view separately to make sure it received the :set_file event
-      render(view) =~ "livebook_web"
-    end
-
-    test "allows importing when a notebook file is selected", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/")
-
-      path = test_notebook_path("basic")
-
-      view
-      |> element(~s{form[phx-change="set_path"]})
-      |> render_change(%{path: Path.dirname(path) <> "/"})
-
-      view
-      |> element("button", "basic.livemd")
-      |> render_click()
-
-      assert assert {:error, {:live_redirect, %{to: to}}} =
-                      view
-                      |> element(~s{button[phx-click="fork"]}, "Fork")
-                      |> render_click()
-
-      assert to =~ "/sessions/"
-
-      close_session_by_path(to)
-    end
-
-    @tag :tmp_dir
-    test "disables import when a directory is selected", %{conn: conn, tmp_dir: tmp_dir} do
-      {:ok, view, _} = live(conn, "/")
-
-      view
-      |> element(~s{form[phx-change="set_path"]})
-      |> render_change(%{path: tmp_dir <> "/"})
-
-      assert view
-             |> element(~s{button[phx-click="fork"][disabled]}, "Fork")
-             |> has_element?()
-    end
-
-    test "disables import when a nonexistent file is selected", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/")
-
-      path = File.cwd!() |> Path.join("nonexistent.livemd")
-
-      view
-      |> element(~s{form[phx-change="set_path"]})
-      |> render_change(%{path: path})
-
-      assert view
-             |> element(~s{button[phx-click="fork"][disabled]}, "Fork")
-             |> has_element?()
-    end
-
-    @tag :tmp_dir
-    test "disables open when a write-protected notebook is selected",
-         %{conn: conn, tmp_dir: tmp_dir} do
-      {:ok, view, _} = live(conn, "/")
-
-      path = Path.join(tmp_dir, "write_protected.livemd")
-      File.touch!(path)
-      File.chmod!(path, 0o444)
-
-      view
-      |> element(~s{form[phx-change="set_path"]})
-      |> render_change(%{path: tmp_dir <> "/"})
-
-      view
-      |> element("button", "write_protected.livemd")
-      |> render_click()
-
-      assert view
-             |> element(~s{button[phx-click="open"][disabled]}, "Open")
-             |> has_element?()
-
-      assert view
-             |> element(~s{[data-tooltip="This file is write-protected, please fork instead"]})
-             |> has_element?()
-    end
+    close_session_by_path(to)
   end
 
   describe "sessions list" do
@@ -120,7 +40,7 @@ defmodule LivebookWeb.HomeLiveTest do
       {:ok, session1} = Sessions.create_session()
       {:ok, session2} = Sessions.create_session()
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       assert render(view) =~ session1.id
       assert render(view) =~ session2.id
@@ -131,7 +51,7 @@ defmodule LivebookWeb.HomeLiveTest do
     test "updates UI whenever a session is added or deleted", %{conn: conn} do
       Sessions.subscribe()
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       {:ok, %{id: id} = session} = Sessions.create_session()
       assert_receive {:session_created, %{id: ^id}}
@@ -146,17 +66,14 @@ defmodule LivebookWeb.HomeLiveTest do
       {:ok, session} = Sessions.create_session()
       Session.set_notebook_name(session.pid, "My notebook")
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       {:error, {:redirect, %{to: to}}} =
         view
         |> element(~s{[data-test-session-id="#{session.id}"] a}, "Download source")
         |> render_click
 
-      assert to ==
-               Routes.session_path(conn, :download_source, session.id, "livemd",
-                 include_outputs: false
-               )
+      assert to == ~p"/sessions/#{session.id}/download/export/livemd?include_outputs=false"
 
       Session.close(session.pid)
     end
@@ -165,7 +82,7 @@ defmodule LivebookWeb.HomeLiveTest do
       {:ok, session} = Sessions.create_session()
       Session.set_notebook_name(session.pid, "My notebook")
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       assert {:error, {:live_redirect, %{to: to}}} =
                view
@@ -182,29 +99,31 @@ defmodule LivebookWeb.HomeLiveTest do
     end
 
     test "allows closing session after confirmation", %{conn: conn} do
-      {:ok, session} = Sessions.create_session()
+      {:ok, %{id: id} = session} = Sessions.create_session()
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       assert render(view) =~ session.id
 
       view
-      |> element(~s{[data-test-session-id="#{session.id}"] a}, "Close")
+      |> element(~s{[data-test-session-id="#{session.id}"] button}, "Close")
       |> render_click()
 
-      view
-      |> element(~s{button[role=button]}, "Close session")
-      |> render_click()
+      Sessions.subscribe()
+
+      render_confirm(view)
+
+      assert_receive {:session_closed, %{id: ^id}}
 
       refute render(view) =~ session.id
     end
 
     test "close all selected sessions using bulk action", %{conn: conn} do
-      {:ok, session1} = Sessions.create_session()
-      {:ok, session2} = Sessions.create_session()
-      {:ok, session3} = Sessions.create_session()
+      {:ok, %{id: id1} = session1} = Sessions.create_session()
+      {:ok, %{id: id2} = session2} = Sessions.create_session()
+      {:ok, %{id: id3} = session3} = Sessions.create_session()
 
-      {:ok, view, _} = live(conn, "/")
+      {:ok, view, _} = live(conn, ~p"/")
 
       assert render(view) =~ session1.id
       assert render(view) =~ session2.id
@@ -219,189 +138,110 @@ defmodule LivebookWeb.HomeLiveTest do
 
       assert render(view) =~ "Are you sure you want to close 3 sessions?"
 
-      view
-      |> element(~s{button[role="button"]}, "Close sessions")
-      |> render_click()
+      Sessions.subscribe()
+
+      render_confirm(view)
+
+      assert_receive {:session_closed, %{id: ^id1}}
+      assert_receive {:session_closed, %{id: ^id2}}
+      assert_receive {:session_closed, %{id: ^id3}}
 
       refute render(view) =~ session1.id
       refute render(view) =~ session2.id
       refute render(view) =~ session3.id
-
-      Session.close([session1.pid, session2.pid, session3.pid])
     end
   end
 
-  test "link to introductory notebook correctly creates a new session", %{conn: conn} do
-    {:ok, view, _} = live(conn, "/")
+  describe "starred notebooks" do
+    @tag :tmp_dir
+    test "starring and unstarring a notebook", %{conn: conn, tmp_dir: tmp_dir} do
+      notebook_path = Path.join(tmp_dir, "notebook.livemd")
+      file = Livebook.FileSystem.File.local(notebook_path)
 
-    assert {:error, {:live_redirect, %{to: to}}} =
-             view
-             |> element(~s{[data-el-explore-section] a}, "Welcome to Livebook")
-             |> render_click()
-             |> follow_redirect(conn)
+      {:ok, session} = Sessions.create_session()
+      Session.set_file(session.pid, file)
+      Session.set_notebook_name(session.pid, "Special notebook")
 
-    {:ok, view, _} = live(conn, to)
-    assert render(view) =~ "Welcome to Livebook"
+      wait_for_session_update(session.pid)
 
-    close_session_by_path(to)
-  end
+      {:ok, view, _} = live(conn, ~p"/")
 
-  describe "notebook import" do
-    test "allows importing notebook directly from content", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/home/import/content")
+      Livebook.NotebookManager.subscribe_starred_notebooks()
 
-      notebook_content = """
-      # My notebook
-      """
+      Livebook.NotebookManager.add_starred_notebook(file, "Special notebook")
+      assert_receive {:starred_notebooks_updated, _}
 
-      view
-      |> element("form", "Import")
-      |> render_submit(%{data: %{content: notebook_content}})
+      assert view
+             |> element(~s/#starred-notebooks/, "Special notebook")
+             |> has_element?()
 
-      {path, _flash} = assert_redirect(view, 5000)
+      Livebook.NotebookManager.remove_starred_notebook(file)
+      assert_receive {:starred_notebooks_updated, _}
 
-      {:ok, view, _} = live(conn, path)
-      assert render(view) =~ "My notebook"
-
-      close_session_by_path(path)
-    end
-
-    test "should show info flash with information about the imported notebook", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/home/import/content")
-
-      notebook_content = """
-      # My notebook
-      """
-
-      view
-      |> element("form", "Import")
-      |> render_submit(%{data: %{content: notebook_content}})
-
-      {path, flash} = assert_redirect(view, 5000)
-
-      assert flash["info"] =~
-               "You have imported a notebook, no code has been executed so far. You should read and evaluate code as needed."
-
-      close_session_by_path(path)
-    end
-
-    test "should show warning flash when the imported notebook have errors", %{conn: conn} do
-      {:ok, view, _} = live(conn, "/home/import/content")
-
-      # Notebook with 3 headers
-      notebook_content = """
-      # My notebook
-      # My notebook
-      # My notebook
-      """
-
-      view
-      |> element("form", "Import")
-      |> render_submit(%{data: %{content: notebook_content}})
-
-      {path, flash} = assert_redirect(view, 5000)
-
-      assert flash["warning"] =~
-               "We found problems while importing the file and tried to autofix them:\n- Downgrading all headings, because 3 instances of heading 1 were found"
-
-      close_session_by_path(path)
-    end
-  end
-
-  describe "public import endpoint" do
-    test "imports notebook from the given url and redirects to the new session", %{conn: conn} do
-      bypass = Bypass.open()
-
-      Bypass.expect_once(bypass, "GET", "/notebook", fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("text/plain")
-        |> Plug.Conn.resp(200, "# My notebook")
-      end)
-
-      notebook_url = "http://localhost:#{bypass.port}/notebook"
-
-      assert {:error, {:live_redirect, %{to: to}}} =
-               live(conn, "/import?url=#{URI.encode_www_form(notebook_url)}")
-
-      {:ok, view, _} = live(conn, to)
-      assert render(view) =~ "My notebook"
-
-      close_session_by_path(to)
+      refute view
+             |> element(~s/#starred-notebooks/, "Special notebook")
+             |> has_element?()
     end
 
     @tag :tmp_dir
-    test "imports notebook from local file URL", %{conn: conn, tmp_dir: tmp_dir} do
+    test "opening a starred notebook", %{conn: conn, tmp_dir: tmp_dir} do
       notebook_path = Path.join(tmp_dir, "notebook.livemd")
-      File.write!(notebook_path, "# My notebook")
-      notebook_url = "file://" <> notebook_path
+      File.write!(notebook_path, "# Starred notebook")
+      file = Livebook.FileSystem.File.local(notebook_path)
+      Livebook.NotebookManager.add_starred_notebook(file, "Starred notebook")
 
-      assert {:error, {:live_redirect, %{to: to}}} =
-               live(conn, "/import?url=#{URI.encode_www_form(notebook_url)}")
+      {:ok, view, _} = live(conn, ~p"/")
+
+      card_html =
+        view
+        |> element(~s/#starred-notebooks [data-test-idx]/, "Starred notebook")
+        |> render()
+
+      assert [attr] = Regex.run(~r/data-test-idx="\d+"/, card_html)
+
+      view
+      |> element(~s/#starred-notebooks [#{attr}] button/, "Open")
+      |> render_click()
+
+      {to, _flash} = assert_redirect(view)
+
+      assert to =~ "/sessions/"
 
       {:ok, view, _} = live(conn, to)
-      assert render(view) =~ "My notebook"
+      assert render(view) =~ "Starred notebook"
 
       close_session_by_path(to)
-    end
-
-    test "redirects to the import form on error", %{conn: conn} do
-      bypass = Bypass.open()
-
-      Bypass.expect(bypass, "GET", "/notebook", fn conn ->
-        Plug.Conn.resp(conn, 500, "Error")
-      end)
-
-      notebook_url = "http://localhost:#{bypass.port}/notebook"
-
-      assert {:error, {:live_redirect, %{to: to}}} =
-               live(conn, "/import?url=#{URI.encode_www_form(notebook_url)}")
-
-      assert to == "/home/import/url?url=#{URI.encode_www_form(notebook_url)}"
-
-      {:ok, view, _} = live(conn, to)
-      assert render(view) =~ notebook_url
     end
   end
 
-  describe "public open endpoint" do
-    test "checkouts the directory when a directory is passed", %{conn: conn} do
-      directory_path = Path.join(File.cwd!(), "test")
+  describe "hubs" do
+    test "renders persisted hubs in the sidebar", %{conn: conn} do
+      team = Livebook.HubHelpers.offline_hub()
 
-      {:ok, view, _} = live(conn, "/?path=#{directory_path}")
-
-      assert render(view) =~ directory_path
+      {:ok, view, _} = live(conn, ~p"/")
+      assert render(view) =~ "WORKSPACES"
+      assert render(view) =~ team.hub_name
+      assert render(view) =~ "Add Organization"
     end
+  end
 
-    @tag :tmp_dir
-    test "opens a file when livebook file is passed", %{conn: conn, tmp_dir: tmp_dir} do
-      notebook_path = Path.join(tmp_dir, "notebook.livemd")
+  test "handles user profile update", %{conn: conn} do
+    {:ok, view, _} = live(conn, ~p"/")
+    data = %{user: %{name: "Jake Peralta", hex_color: "#123456"}}
 
-      :ok = File.write(notebook_path, "# My notebook")
+    view
+    |> element("#user_form")
+    |> render_change(data)
 
-      assert {:error, {:live_redirect, %{flash: %{}, to: to}}} =
-               live(conn, "/open?path=#{notebook_path}")
+    view
+    |> element("#user_form")
+    |> render_submit(data)
 
-      {:ok, view, _} = live(conn, to)
-      assert render(view) =~ "My notebook"
-
-      close_session_by_path(to)
-    end
+    assert render(view) =~ "Jake Peralta"
+    assert render(view) =~ "#123456"
   end
 
   # Helpers
-
-  defp test_notebook_path(name) do
-    path =
-      ["../../support/notebooks", name <> ".livemd"]
-      |> Path.join()
-      |> Path.expand(__DIR__)
-
-    unless File.exists?(path) do
-      raise "Cannot find test notebook with the name: #{name}"
-    end
-
-    path
-  end
 
   defp close_session_by_path("/sessions/" <> session_id) do
     {:ok, session} = Sessions.fetch_session(session_id)

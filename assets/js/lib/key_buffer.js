@@ -1,8 +1,8 @@
 /**
- * Allows for recording a sequence of keys pressed
- * and matching against that sequence.
+ * Allows for recording a sequence of keys pressed and matching against
+ * that sequence.
  */
-class KeyBuffer {
+export default class KeyBuffer {
   /**
    * @param {Number} resetTimeout The number of milliseconds to wait after new key is pushed before the buffer is cleared.
    */
@@ -31,11 +31,11 @@ class KeyBuffer {
    * Immediately clears the buffer.
    */
   reset() {
-    if (this.resetTimeout) {
-      clearTimeout(this.resetTimeout);
+    if (this.resetTimeoutId) {
+      clearTimeout(this.resetTimeoutId);
     }
 
-    this.clearTimeout = null;
+    this.resetTimeoutId = null;
     this.buffer = [];
   }
 
@@ -59,5 +59,3 @@ class KeyBuffer {
     return matches;
   }
 }
-
-export default KeyBuffer;

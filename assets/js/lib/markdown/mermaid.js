@@ -4,8 +4,6 @@ import CacheLRU from "../../lib/cache_lru";
 let idCount = 0;
 let getId = () => `mermaid-graph-${idCount++}`;
 
-let mermaidInitialized = false;
-
 const fontAwesomeVersion = "5.15.4";
 
 const cache = new CacheLRU(25);
@@ -13,7 +11,7 @@ const cache = new CacheLRU(25);
 /**
  * Renders SVG graph from mermaid definition.
  */
-export function renderMermaid(definition) {
+export function renderMermaid(definition, options) {
   const hash = md5Base64(definition);
   const svg = cache.get(hash);
 
@@ -24,27 +22,25 @@ export function renderMermaid(definition) {
   return importMermaid().then((mermaid) => {
     injectFontAwesomeIfNeeded(definition);
 
-    try {
-      const svg = mermaid.render(getId(), definition);
-      cache.set(hash, svg);
-      return svg;
-    } catch (e) {
-      return `<div class="error-box whitespace-pre-wrap"><span class="font-semibold">Mermaid</span>\n${e.message}</div>`;
-    }
+    // There is no way to specify options for individual render, so
+    // we call initialize every time to set the global options.
+    // See https://github.com/mermaid-js/mermaid/issues/5427
+    mermaid.initialize({ startOnLoad: false, ...options });
+
+    return mermaid
+      .render(getId(), definition)
+      .then(({ svg }) => {
+        cache.set(hash, svg);
+        return svg;
+      })
+      .catch((error) => {
+        return `<div class="error-box whitespace-pre-wrap"><span class="font-semibold">Mermaid</span>\n${error.message}</div>`;
+      });
   });
 }
 
 function importMermaid() {
-  return import(
-    /* webpackChunkName: "mermaid" */
-    "mermaid"
-  ).then(({ default: mermaid }) => {
-    if (!mermaidInitialized) {
-      mermaid.initialize({ startOnLoad: false });
-      mermaidInitialized = true;
-    }
-    return mermaid;
-  });
+  return import("mermaid").then(({ default: mermaid }) => mermaid);
 }
 
 function injectFontAwesomeIfNeeded(definition) {
