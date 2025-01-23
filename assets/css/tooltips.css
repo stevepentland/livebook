@@ -14,6 +14,7 @@ Example usage:
   display: flex;
   --distance: 4px;
   --arrow-size: 5px;
+  --arrow-side-offset: 10px;
   --show-delay: 0.5s;
 }
 
@@ -22,7 +23,7 @@ Example usage:
 }
 
 .tooltip.distant-medium {
-  --distance: 10px;
+  --distance: 14px;
 }
 
 /* Tooltip text */
@@ -73,7 +74,7 @@ Example usage:
 
 /*
 Note: we let the arrow and content overlap 1px,
-othrwise there's a tiny space between them.
+otherwise there's a tiny space between them.
 */
 
 .tooltip.top:before {
@@ -82,7 +83,17 @@ othrwise there's a tiny space between them.
   transform: translate(-50%, calc(1px - var(--arrow-size) - var(--distance)));
 }
 
-.tooltip.top:after {
+.tooltip.top-right:before {
+  bottom: 100%;
+  left: 50%;
+  transform: translate(
+    calc(0px - var(--arrow-side-offset)),
+    calc(1px - var(--arrow-size) - var(--distance))
+  );
+}
+
+.tooltip.top:after,
+.tooltip.top-right:after {
   bottom: 100%;
   left: 50%;
   transform: translate(-50%, calc(0px - var(--distance)));
@@ -98,7 +109,17 @@ othrwise there's a tiny space between them.
   transform: translate(-50%, calc(var(--arrow-size) - 1px + var(--distance)));
 }
 
-.tooltip.bottom:after {
+.tooltip.bottom-left:before {
+  top: 100%;
+  left: 50%;
+  transform: translate(
+    calc(-100% + var(--arrow-side-offset)),
+    calc(var(--arrow-size) - 1px + var(--distance))
+  );
+}
+
+.tooltip.bottom:after,
+.tooltip.bottom-left:after {
   top: 100%;
   left: 50%;
   transform: translate(-50%, var(--distance));

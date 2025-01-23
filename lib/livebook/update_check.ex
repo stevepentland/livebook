@@ -1,6 +1,4 @@
 defmodule Livebook.UpdateCheck do
-  @moduledoc false
-
   # Periodically checks for available Livebook update.
 
   use GenServer
@@ -46,7 +44,7 @@ defmodule Livebook.UpdateCheck do
   @impl true
   def init({}) do
     state = %{
-      enabled: Livebook.Settings.update_check_enabled?(),
+      enabled: update_check_enabled?(),
       new_version: nil,
       timer_ref: nil,
       request_ref: nil
@@ -85,13 +83,12 @@ defmodule Livebook.UpdateCheck do
 
     state =
       case response do
-        {:ok, version} ->
-          new_version = if newer?(version), do: version
-          state = %{state | new_version: new_version}
+        {:ok, release} ->
+          state = %{state | new_version: new_version(release)}
           schedule_check(state, @day_in_ms)
 
         {:error, error} ->
-          Logger.error("version check failed, #{error}")
+          Logger.warning("version check failed, #{error}")
           schedule_check(state, @hour_in_ms)
       end
 
@@ -99,11 +96,17 @@ defmodule Livebook.UpdateCheck do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{request_ref: ref} = state) do
-    Logger.error("version check failed, reason: #{inspect(reason)}")
+    Logger.warning("version check failed, reason: #{inspect(reason)}")
     {:noreply, %{state | request_ref: nil} |> schedule_check(@hour_in_ms)}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  if Mix.env() == :test do
+    defp update_check_enabled?(), do: false
+  else
+    defp update_check_enabled?(), do: Livebook.Settings.update_check_enabled?()
+  end
 
   defp schedule_check(%{enabled: false} = state, _time), do: state
 
@@ -125,27 +128,45 @@ defmodule Livebook.UpdateCheck do
   end
 
   defp fetch_latest_version() do
-    url = "https://api.github.com/repos/livebook-dev/livebook/releases/latest"
-    headers = [{"accept", "application/vnd.github.v3+json"}]
+    repo = Livebook.Config.github_release_info().repo
+    url = "https://api.github.com/repos/#{repo}/releases/latest"
+    headers = %{accept: "application/vnd.github.v3+json"}
 
-    case Livebook.Utils.HTTP.request(:get, url, headers: headers) do
-      {:ok, status, _headers, body} ->
-        with 200 <- status,
-             {:ok, data} <- Jason.decode(body),
-             %{"tag_name" => "v" <> version} <- data do
-          {:ok, version}
-        else
-          _ -> {:error, "unexpected response"}
-        end
+    req = Req.new() |> Livebook.Utils.req_attach_defaults()
 
-      {:error, reason} ->
-        {:error, "failed to make a request, reason: #{inspect(reason)}"}
+    case Req.get(req, url: url, headers: headers) do
+      {:ok, %{status: 200, body: release}} ->
+        {:ok, release}
+
+      {:ok, %{status: status}} ->
+        {:error, "unexpected response, HTTP status #{status}"}
+
+      {:error, exception} ->
+        {:error, "failed to make a request, reason: #{Exception.message(exception)}}"}
     end
   end
 
-  defp newer?(version) do
-    current_version = Application.spec(:livebook, :vsn) |> List.to_string()
-    stable?(version) and Version.compare(current_version, version) == :lt
+  defp new_version(release) do
+    current_version = Livebook.Config.github_release_info().version
+
+    with %{
+           "tag_name" => "v" <> version,
+           "published_at" => published_at,
+           "draft" => false
+         } <- release,
+         {:ok, published_at} <- NaiveDateTime.from_iso8601(published_at),
+         true <- at_least_one_day_ago?(published_at) and stable?(version),
+         :lt <- Version.compare(current_version, version) do
+      version
+    else
+      _ -> nil
+    end
+  end
+
+  @one_day_in_seconds 60 * 60 * 24
+
+  defp at_least_one_day_ago?(naive_datetime) do
+    NaiveDateTime.diff(NaiveDateTime.utc_now(), naive_datetime) > @one_day_in_seconds
   end
 
   defp stable?(version) do

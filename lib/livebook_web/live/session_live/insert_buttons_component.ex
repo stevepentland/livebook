@@ -1,88 +1,177 @@
 defmodule LivebookWeb.SessionLive.InsertButtonsComponent do
   use LivebookWeb, :live_component
 
+  import LivebookWeb.NotebookComponents
+
+  defguardp is_many(list) when tl(list) != []
+
   def render(assigns) do
     ~H"""
-    <div class="relative top-0.5 m-0 flex justify-center"
+    <div
+      class="relative top-0.5 m-0 flex justify-center"
       role="toolbar"
       aria-label="insert new"
-      data-el-insert-buttons>
-      <div class={"w-full absolute z-10 hover:z-[11] #{if(@persistent, do: "opacity-100", else: "opacity-0")} hover:opacity-100 focus-within:opacity-100 flex space-x-2 justify-center items-center"}>
-        <button class="button-base button-small"
-          phx-click="insert_cell_below"
-          phx-value-type="code"
-          phx-value-section_id={@section_id}
-          phx-value-cell_id={@cell_id}
-          >+ Code</button>
+      data-el-insert-buttons
+    >
+      <div
+        class="absolute inset-0 h-[30px] z-[100] bg-white rounded-lg border-2 border-dashed border-gray-400"
+        data-el-insert-drop-area
+        data-section-id={@section_id}
+        data-cell-id={@cell_id}
+        id={"cell-#{@id}-dropzone"}
+        phx-hook="Dropzone"
+      >
+      </div>
+      <div class={
+        "w-full md:absolute z-10 hover:z-[11] #{if(@persistent, do: "opacity-100", else: "opacity-0")} hover:opacity-100 focus-within:opacity-100 flex space-x-2 justify-center items-center"
+      }>
+        <.menu id={"cell-#{@id}-insert"} position="bottom-left" distant>
+          <:toggle>
+            <.insert_button>
+              <div
+                class="pr-2"
+                phx-click="insert_cell_below"
+                phx-value-type="code"
+                phx-value-section_id={@section_id}
+                phx-value-cell_id={@cell_id}
+              >
+                + {@default_language |> Atom.to_string() |> String.capitalize()}
+              </div>
+              <div class="-mr-1 pl-1 flex items-center border-l border-gray-200 group-hover:border-gray-300 group-focus:border-gray-300">
+                <.remix_icon icon="arrow-down-s-line" class="text-lg leading-none" />
+              </div>
+            </.insert_button>
+          </:toggle>
+          <.menu_item>
+            <button
+              role="menuitem"
+              phx-click="set_default_language"
+              phx-value-type="code"
+              phx-value-language="elixir"
+              phx-value-section_id={@section_id}
+              phx-value-cell_id={@cell_id}
+            >
+              <.cell_icon cell_type={:code} language={:elixir} />
+              <span>Elixir</span>
+            </button>
+          </.menu_item>
+          <.menu_item>
+            <button
+              role="menuitem"
+              phx-click="set_default_language"
+              phx-value-type="code"
+              phx-value-language="erlang"
+              phx-value-section_id={@section_id}
+              phx-value-cell_id={@cell_id}
+            >
+              <.cell_icon cell_type={:code} language={:erlang} />
+              <span>Erlang</span>
+            </button>
+          </.menu_item>
+        </.menu>
         <.menu id={"#{@id}-block-menu"} position="bottom-left">
           <:toggle>
-            <button class="button-base button-small">+ Block</button>
+            <.insert_button>+ Block</.insert_button>
           </:toggle>
-          <:content>
-            <button class="menu-item text-gray-500"
+          <.menu_item>
+            <button
               role="menuitem"
               phx-click="insert_cell_below"
               phx-value-type="markdown"
               phx-value-section_id={@section_id}
-              phx-value-cell_id={@cell_id}>
+              phx-value-cell_id={@cell_id}
+            >
               <.remix_icon icon="markdown-fill" />
-              <span class="font-medium">Markdown</span>
+              <span>Markdown</span>
             </button>
-            <button class="menu-item text-gray-500"
+          </.menu_item>
+          <.menu_item>
+            <button
               role="menuitem"
               phx-click="insert_section_below"
               phx-value-section_id={@section_id}
-              phx-value-cell_id={@cell_id}>
+              phx-value-cell_id={@cell_id}
+            >
               <.remix_icon icon="h-2" />
-              <span class="font-medium">Section</span>
+              <span>Section</span>
             </button>
-            <div class="my-2 border-b border-gray-200"></div>
-            <button class="menu-item text-gray-500"
+          </.menu_item>
+          <.menu_item>
+            <button
+              role="menuitem"
+              phx-click="insert_branching_section_below"
+              phx-value-section_id={@section_id}
+              phx-value-cell_id={@cell_id}
+            >
+              <.remix_icon icon="git-branch-line" />
+              <span>Branching section</span>
+            </button>
+          </.menu_item>
+          <div class="flex items-center mt-4 mb-1 px-5 text-xs text-gray-400 font-light">
+            MARKDOWN
+          </div>
+          <.menu_item>
+            <button
               role="menuitem"
               phx-click="insert_cell_below"
               phx-value-type="diagram"
               phx-value-section_id={@section_id}
-              phx-value-cell_id={@cell_id}>
-            <.remix_icon icon="organization-chart" />
-            <span class="font-medium">Diagram</span>
-          </button>
-          </:content>
+              phx-value-cell_id={@cell_id}
+            >
+              <.remix_icon icon="organization-chart" />
+              <span>Diagram</span>
+            </button>
+          </.menu_item>
+          <.menu_item>
+            <button
+              phx-click="insert_image"
+              phx-value-section_id={@section_id}
+              phx-value-cell_id={@cell_id}
+              aria-label="insert image"
+              role="menuitem"
+            >
+              <.remix_icon icon="image-add-line" />
+              <span>Image</span>
+            </button>
+          </.menu_item>
+          <%= if @example_snippet_definitions != [] do %>
+            <div class="flex items-center mt-4 mb-1 px-5 text-xs text-gray-400 font-light">
+              CODE
+            </div>
+            <.menu_item :for={definition <- @example_snippet_definitions}>
+              <.example_snippet_insert_button
+                definition={definition}
+                section_id={@section_id}
+                cell_id={@cell_id}
+              />
+            </.menu_item>
+          <% end %>
         </.menu>
         <%= cond do %>
-          <% not Livebook.Runtime.connected?(@runtime) -> %>
-            <button class="button-base button-small"
-              phx-click={
-                with_confirm(
-                  JS.push("setup_default_runtime"),
-                  title: "Setup runtime",
-                  description: ~s'''
-                  To see the available smart cells, you need a connected runtime.
-                  Do you want to connect and setup the default one?
-                  ''',
-                  confirm_text: "Setup runtime",
-                  confirm_icon: "play-line",
-                  danger: false
-                )
-              }>+ Smart</button>
-
+          <% @runtime_status == :disconnected -> %>
+            <.insert_button phx-click={
+              JS.push("setup_runtime",
+                value: %{reason: "To see the available smart cells, you need a connected runtime."}
+              )
+            }>
+              + Smart
+            </.insert_button>
           <% @smart_cell_definitions == [] -> %>
             <span class="tooltip right" data-tooltip="No smart cells available">
-              <button class="button-base button-small" disabled>+ Smart</button>
+              <.insert_button disabled>+ Smart</.insert_button>
             </span>
-
           <% true -> %>
             <.menu id={"#{@id}-smart-menu"} position="bottom-left">
               <:toggle>
-                <button class="button-base button-small">+ Smart</button>
+                <.insert_button>+ Smart</.insert_button>
               </:toggle>
-              <:content>
-                <%= for definition <- Enum.sort_by(@smart_cell_definitions, & &1.name) do %>
-                  <.smart_cell_insert_button
-                    definition={definition}
-                    section_id={@section_id}
-                    cell_id={@cell_id} />
-                <% end %>
-              </:content>
+              <.menu_item :for={definition <- @smart_cell_definitions}>
+                <.smart_cell_insert_button
+                  definition={definition}
+                  section_id={@section_id}
+                  cell_id={@cell_id}
+                />
+              </.menu_item>
             </.menu>
         <% end %>
       </div>
@@ -90,81 +179,113 @@ defmodule LivebookWeb.SessionLive.InsertButtonsComponent do
     """
   end
 
-  defp smart_cell_insert_button(%{definition: %{requirement: %{variants: [_, _ | _]}}} = assigns) do
+  attr :disabled, :boolean, default: false
+  attr :rest, :global
+
+  slot :inner_block
+
+  def insert_button(assigns) do
+    ~H"""
+    <button
+      {@rest}
+      class={[
+        "inline-flex items-center px-2 py-1 rounded-lg font-medium text-sm whitespace-nowrap border",
+        if @disabled do
+          "cursor-default pointer-events-none border-transparent bg-gray-100 text-gray-400"
+        else
+          "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100 focus:bg-gray-100"
+        end
+      ]}
+    >
+      {render_slot(@inner_block)}
+    </button>
+    """
+  end
+
+  defp example_snippet_insert_button(assigns) when is_many(assigns.definition.variants) do
     ~H"""
     <.submenu>
-      <button class="menu-item text-gray-500" role="menuitem">
-        <span class="font-medium"><%= @definition.name %></span>
-      </button>
-      <:content>
-        <%= for {variant, idx} <- Enum.with_index(@definition.requirement.variants) do %>
-          <button class="menu-item text-gray-500"
-            role="menuitem"
-            phx-click={on_smart_cell_click(@definition, idx, @section_id, @cell_id)}>
-            <span class="font-medium"><%= variant.name %></span>
-          </button>
-        <% end %>
-      </:content>
+      <:primary>
+        <button role="menuitem">
+          <.remix_icon icon={@definition.icon} />
+          <span>{@definition.name}</span>
+        </button>
+      </:primary>
+      <.menu_item :for={{variant, idx} <- Enum.with_index(@definition.variants)}>
+        <button
+          role="menuitem"
+          phx-click={on_example_snippet_click(@definition, idx, @section_id, @cell_id)}
+        >
+          <span>{variant.name}</span>
+        </button>
+      </.menu_item>
+    </.submenu>
+    """
+  end
+
+  defp example_snippet_insert_button(assigns) do
+    ~H"""
+    <button
+      role="menuitem"
+      phx-click={on_example_snippet_click(@definition, 0, @section_id, @cell_id)}
+    >
+      <.remix_icon icon={@definition.icon} />
+      <span>{@definition.name}</span>
+    </button>
+    """
+  end
+
+  defp smart_cell_insert_button(assigns) when is_many(assigns.definition.requirement_presets) do
+    ~H"""
+    <.submenu>
+      <:primary>
+        <button role="menuitem">
+          <span>{@definition.name}</span>
+        </button>
+      </:primary>
+      <.menu_item :for={{preset, idx} <- Enum.with_index(@definition.requirement_presets)}>
+        <button
+          role="menuitem"
+          phx-click={on_smart_cell_click(@definition, idx, @section_id, @cell_id)}
+        >
+          <span>{preset.name}</span>
+        </button>
+      </.menu_item>
     </.submenu>
     """
   end
 
   defp smart_cell_insert_button(assigns) do
     ~H"""
-    <button class="menu-item text-gray-500"
-      role="menuitem"
-      phx-click={on_smart_cell_click(@definition, 0, @section_id, @cell_id)}>
-      <span class="font-medium"><%= @definition.name %></span>
+    <button role="menuitem" phx-click={on_smart_cell_click(@definition, @section_id, @cell_id)}>
+      <span>{@definition.name}</span>
     </button>
     """
   end
 
-  defp on_smart_cell_click(%{requirement: nil} = definition, _variant_idx, section_id, cell_id) do
-    insert_smart_cell(definition, section_id, cell_id)
-  end
-
-  defp on_smart_cell_click(%{requirement: %{}} = definition, variant_idx, section_id, cell_id) do
-    variant = Enum.fetch!(definition.requirement.variants, variant_idx)
-
-    with_confirm(
-      JS.push("add_smart_cell_dependencies",
-        value: %{kind: definition.kind, variant_idx: variant_idx}
-      )
-      |> insert_smart_cell(definition, section_id, cell_id)
-      |> JS.push("queue_cells_reevaluation"),
-      title: "Add packages",
-      description:
-        case variant.packages do
-          [%{name: name}] ->
-            ~s'''
-            The <span class="font-semibold">“#{definition.name}“</span>
-            smart cell requires the #{code_tag(name)} package. Do you want to add
-            it as a dependency and restart?
-            '''
-
-          packages ->
-            ~s'''
-            The <span class="font-semibold">“#{definition.name}“</span>
-            smart cell requires the #{packages |> Enum.map(&code_tag(&1.name)) |> format_items()}
-            packages. Do you want to add them as dependencies and restart?
-            '''
-        end,
-      confirm_text: "Add and restart",
-      confirm_icon: "add-line",
-      danger: false,
-      html: true
+  defp on_example_snippet_click(definition, variant_idx, section_id, cell_id) do
+    JS.push("insert_example_snippet_below",
+      value: %{
+        definition_name: definition.name,
+        variant_idx: variant_idx,
+        section_id: section_id,
+        cell_id: cell_id
+      }
     )
   end
 
-  defp code_tag(text), do: "<code>#{text}</code>"
+  defp on_smart_cell_click(definition, section_id, cell_id) do
+    preset_idx = if definition.requirement_presets == [], do: nil, else: 0
+    on_smart_cell_click(definition, preset_idx, section_id, cell_id)
+  end
 
-  defp insert_smart_cell(js \\ %JS{}, definition, section_id, cell_id) do
-    JS.push(js, "insert_cell_below",
+  defp on_smart_cell_click(definition, preset_idx, section_id, cell_id) do
+    JS.push("insert_smart_cell_below",
       value: %{
-        type: "smart",
         kind: definition.kind,
         section_id: section_id,
-        cell_id: cell_id
+        cell_id: cell_id,
+        preset_idx: preset_idx
       }
     )
   end
