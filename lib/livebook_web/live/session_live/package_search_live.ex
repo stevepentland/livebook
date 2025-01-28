@@ -2,16 +2,11 @@ defmodule LivebookWeb.SessionLive.PackageSearchLive do
   use LivebookWeb, :live_view
 
   @impl true
-  def mount(
-        _params,
-        %{"session" => session, "runtime" => runtime, "return_to" => return_to},
-        socket
-      ) do
+  def mount(_params, %{"session_pid" => session_pid, "runtime" => runtime}, socket) do
     socket =
       assign(socket,
-        session: session,
+        session: Livebook.Session.get_by_pid(session_pid),
         runtime: runtime,
-        return_to: return_to,
         search: "",
         search_ref: nil,
         packages: [],
@@ -26,7 +21,7 @@ defmodule LivebookWeb.SessionLive.PackageSearchLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="p-6 pb-4 flex flex-col space-y-8">
+    <div class="flex flex-col space-y-5">
       <h3 class="text-2xl font-semibold text-gray-800">
         Search packages
       </h3>
@@ -34,32 +29,32 @@ defmodule LivebookWeb.SessionLive.PackageSearchLive do
         Find external packages for your notebook
       </p>
       <form phx-submit="submit" phx-change="search">
-        <input class="input"
+        <.text_field
           name="search"
           value={@search}
           phx-debounce="250"
           placeholder="Search"
           autocomplete="off"
           spellcheck="false"
-          autofocus />
+          autofocus
+        />
       </form>
-      <div class={"flex flex-col divide-y h-[20rem] pr-2 -mr-2 overflow-y-auto tiny-scrollbar #{if @search_ref, do: "opacity-75"}"}>
+      <div class={[
+        "flex flex-col divide-y h-[20rem] pr-2 -mr-2 overflow-y-auto tiny-scrollbar",
+        if(@search_ref, do: "opacity-30 transition-opacity duration-300")
+      ]}>
         <%= cond do %>
           <% @error_message -> %>
             <div class="error-box">
-              <%= @error_message %>
+              {@error_message}
             </div>
-
           <% @packages == [] -> %>
-          <div class="flex h-full items-center justify-center text-gray-600">
-            <.remix_icon icon="windy-line" class="text-xl" />
-            <div class="ml-2">No results</div>
-          </div>
-
-        <% true -> %>
-          <%= for {package, idx} <- Enum.with_index(@packages) do %>
-            <.package package={package} idx={idx} />
-          <% end %>
+            <div class="flex h-full items-center justify-center text-gray-600">
+              <.remix_icon icon="windy-line" class="text-xl" />
+              <div class="ml-2">No results</div>
+            </div>
+          <% true -> %>
+            <.package :for={{package, idx} <- Enum.with_index(@packages)} package={package} idx={idx} />
         <% end %>
       </div>
     </div>
@@ -72,23 +67,21 @@ defmodule LivebookWeb.SessionLive.PackageSearchLive do
       <div class="flex-grow p-2 flex flex-col text-sm">
         <div class="flex text-gray-700">
           <%= if @package[:url] do %>
-            <a class="font-semibold" href={@package[:url]} target="_blank"><%= @package.name %></a>
+            <a class="font-semibold" href={@package[:url]} target="_blank">{@package.name}</a>
           <% else %>
-            <span class="font-semibold"><%= @package.name %></span>
+            <span class="font-semibold">{@package.name}</span>
           <% end %>
-          <span class="ml-1"><%= @package.version %></span>
+          <span class="ml-1">{@package.version}</span>
         </div>
         <div class="text-gray-600">
-          <%= @package.description %>
+          {@package.description}
         </div>
       </div>
       <div class="ml-2">
-        <button class="button-base button-gray whitespace-nowrap py-1 px-2"
-          aria-label="add"
-          phx-click={JS.push("add", value: %{idx: @idx})}>
-          <.remix_icon icon="add-line" class="align-middle mr-1 text-xs" />
-          <span class="font-normal text-xs">Add</span>
-        </button>
+        <.button color="gray" small aria-label="add" phx-click={JS.push("add", value: %{idx: @idx})}>
+          <.remix_icon icon="add-line" />
+          <span>Add</span>
+        </.button>
       </div>
     </div>
     """
@@ -143,6 +136,6 @@ defmodule LivebookWeb.SessionLive.PackageSearchLive do
 
   defp add_dependency(socket, dependency) do
     Livebook.Session.add_dependencies(socket.assigns.session.pid, [dependency])
-    push_patch(socket, to: socket.assigns.return_to)
+    assign(socket, search: "", search_ref: nil, packages: [])
   end
 end
