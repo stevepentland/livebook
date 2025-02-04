@@ -20,29 +20,29 @@ defmodule LivebookWeb.SessionLive.ExportElixirComponent do
       <div class="flex flex-col space-y-1">
         <div class="flex justify-between items-center">
           <span class="text-sm text-gray-700 font-semibold">
-            <%= Session.file_name_for_download(@session) <> ".exs" %>
+            {Session.file_name_for_download(@session) <> ".exs"}
           </span>
           <div class="flex justify-end space-x-2">
             <span class="tooltip left" data-tooltip="Copy source">
-              <button class="icon-button"
+              <.icon_button
                 aria-label="copy source"
-                phx-click={JS.dispatch("lb:clipcopy", to: "#export-notebook-source")}>
-                <.remix_icon icon="clipboard-line" class="text-lg" />
-              </button>
+                phx-click={JS.dispatch("lb:clipcopy", to: "#export-notebook-source")}
+              >
+                <.remix_icon icon="clipboard-line" />
+              </.icon_button>
             </span>
             <span class="tooltip left" data-tooltip="Download source">
-              <a class="icon-button"
+              <.icon_button
                 aria-label="download source"
-                href={Routes.session_path(@socket, :download_source, @session.id, "exs")}>
-                <.remix_icon icon="download-2-line" class="text-lg" />
-              </a>
+                href={~p"/sessions/#{@session.id}/download/export/exs"}
+                download
+              >
+                <.remix_icon icon="download-2-line" />
+              </.icon_button>
             </span>
           </div>
         </div>
-        <.code_preview
-          source_id="export-notebook-source"
-          language="elixir"
-          source={@source} />
+        <.code_preview source_id="export-notebook-source" language="elixir" source={@source} />
       </div>
     </div>
     """

@@ -121,7 +121,7 @@ defmodule Livebook.LiveMarkdown.MarkdownHelpersTest do
 
     test "paragraph" do
       markdown = """
-      First paragrpah.
+      First paragraph.
 
       Second paragraph.\
       """
@@ -205,8 +205,18 @@ defmodule Livebook.LiveMarkdown.MarkdownHelpersTest do
 
     test "table without header" do
       markdown = """
-      | Texas | TX | Austin  |
-      | Maine | ME | Augusta |\
+      | Texas | TX  | Austin  |
+      | Maine | ME  | Augusta |\
+      """
+
+      assert markdown == reformat(markdown)
+    end
+
+    test "table with narrow column" do
+      markdown = """
+      | x   | y   | x and y |
+      | :-: | --- | ------- |
+      | 1   | 1   | 0       |\
       """
 
       assert markdown == reformat(markdown)
@@ -318,6 +328,21 @@ defmodule Livebook.LiveMarkdown.MarkdownHelpersTest do
       assert markdown == reformat(markdown)
     end
 
+    test "properly indents nested lists when the parent list has double digit items" do
+      markdown = """
+      #{Enum.map_join(1..9, "\n", fn n -> "#{n}. Item #{n}" end)}
+      10. Item 10
+          * Child item 1
+          * Child item 2
+      11. Item 11
+          ```
+          Enum.to_list(1..10)
+          ```\
+      """
+
+      assert markdown == reformat(markdown)
+    end
+
     test "surprise ordered list" do
       markdown = "1986\\. What a great season."
 
@@ -374,7 +399,7 @@ defmodule Livebook.LiveMarkdown.MarkdownHelpersTest do
     # by comparing against the original content.
     defp reformat(markdown) do
       # Note: we don't parse inline content, so some of the tests
-      # above are not stricly necessary, but we keep them for completeness.
+      # above are not strictly necessary, but we keep them for completeness.
       {:ok, ast, []} = MarkdownHelpers.markdown_to_block_ast(markdown)
       MarkdownHelpers.markdown_from_ast(ast)
     end

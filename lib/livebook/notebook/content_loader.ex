@@ -1,20 +1,18 @@
 defmodule Livebook.Notebook.ContentLoader do
-  @moduledoc false
-
-  alias Livebook.Utils.HTTP
-
   @typedoc """
   A location from where content gets loaded.
   """
   @type location :: {:file, FileSystem.File.t()} | {:url, String.t()}
 
   @doc """
-  Rewrite known URLs, so that they point to plain text file rather than HTML.
+  Rewrite known URLs, so that they point to plain text file rather
+  than HTML.
 
   Currently the rewerites handle:
 
     * GitHub files
     * Gist files
+
   """
   @spec rewrite_url(String.t()) :: String.t()
   def rewrite_url(url) do
@@ -49,14 +47,18 @@ defmodule Livebook.Notebook.ContentLoader do
   defp do_rewrite_url(uri), do: uri
 
   @doc """
-  Loads binary content from the given URl and validates if its plain text.
+  Loads binary content from the given URL and validates if it's plain text.
   """
   @spec fetch_content(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def fetch_content(url) do
-    case HTTP.request(:get, url) do
-      {:ok, 200, headers, body} ->
+    # Given the URL has arbitrary user-specified host, we specify
+    # :pool_max_idle_time, so the Finch pool terminates eventually
+    req = Req.new(pool_max_idle_time: 60_000) |> Livebook.Utils.req_attach_defaults()
+
+    case Req.get(req, url: url) do
+      {:ok, %{status: 200} = res} ->
         valid_content? =
-          case HTTP.fetch_content_type(headers) do
+          case Livebook.Utils.fetch_content_type(res) do
             {:ok, content_type} ->
               content_type in ["text/plain", "text/markdown", "application/octet-stream"]
 
@@ -65,7 +67,7 @@ defmodule Livebook.Notebook.ContentLoader do
           end
 
         if valid_content? do
-          {:ok, body}
+          {:ok, res.body}
         else
           {:error, "invalid content type, make sure the URL points to live markdown"}
         end

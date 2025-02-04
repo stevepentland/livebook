@@ -1,7 +1,7 @@
-import { getAttributeOrDefault, getAttributeOrThrow } from "../lib/attribute";
+import { parseHookProps } from "../lib/attribute";
 import Markdown from "../lib/markdown";
-import { globalPubSub } from "../lib/pub_sub";
-import { md5Base64, smoothlyScrollToElement } from "../lib/utils";
+import { globalPubsub } from "../lib/pubsub";
+import { md5Base64, smoothlyScrollToElement, withStyle } from "../lib/utils";
 import scrollIntoView from "scroll-into-view-if-needed";
 import { isEvaluable } from "../lib/notebook";
 
@@ -11,15 +11,23 @@ import { isEvaluable } from "../lib/notebook";
  * Manages the collaborative editor, takes care of markdown rendering
  * and focusing the editor when applicable.
  *
- * ## Configuration
+ * ## Props
  *
- *   * `data-cell-id` - id of the cell being edited
+ *   * `cell-id` - id of the cell being edited
  *
- *   * `data-type` - type of the cell
+ *   * `type` - type of the cell
  *
- *   * `data-session-path` - root path to the current session
+ *   * `session-path` - root path to the current session
  *
- *   * `data-evaluation-digest` - digest of the last evaluated cell source
+ *   * `evaluation-digest` - digest of the last evaluated cell source
+ *
+ *   * `smart-cell-js-view-ref` - ref for the JS View, applicable
+ *     only to Smart cells
+ *
+ *   * `allowed-uri-schemes` - a list of additional URI schemes that
+ *     should be kept during sanitization. Applicable only to Markdown
+ *     cells
+ *
  */
 const Cell = {
   mounted() {
@@ -33,9 +41,9 @@ const Cell = {
 
     // Setup action handlers
 
-    if (this.props.type === "code") {
+    if (["code", "smart"].includes(this.props.type)) {
       const amplifyButton = this.el.querySelector(
-        `[data-el-amplify-outputs-button]`
+        `[data-el-amplify-outputs-button]`,
       );
       amplifyButton.addEventListener("click", (event) => {
         this.el.toggleAttribute("data-js-amplified");
@@ -44,7 +52,7 @@ const Cell = {
 
     if (this.props.type === "smart") {
       const toggleSourceButton = this.el.querySelector(
-        `[data-el-toggle-source-button]`
+        `[data-el-toggle-source-button]`,
       );
       toggleSourceButton.addEventListener("click", (event) => {
         this.el.toggleAttribute("data-js-source-visible");
@@ -75,18 +83,34 @@ const Cell = {
       this.el.removeAttribute("data-js-hover");
     });
 
-    this.unsubscribeFromNavigationEvents = globalPubSub.subscribe(
-      "navigation",
-      (event) => this.handleNavigationEvent(event)
-    );
+    this.subscriptions = [
+      globalPubsub.subscribe(
+        "navigation:focus_changed",
+        ({ focusableId, scroll }) =>
+          this.handleElementFocused(focusableId, scroll),
+      ),
+      globalPubsub.subscribe("navigation:insert_mode_changed", ({ enabled }) =>
+        this.handleInsertModeChanged(enabled),
+      ),
+      globalPubsub.subscribe("cells:cell_moved", ({ cellId }) =>
+        this.handleCellMoved(cellId),
+      ),
+      globalPubsub.subscribe(
+        `cells:${this.props.cellId}:dispatch_queue_evaluation`,
+        ({ dispatch }) => this.handleDispatchQueueEvaluation(dispatch),
+      ),
+      globalPubsub.subscribe(
+        `cells:${this.props.cellId}:jump_to_line`,
+        ({ line, offset = 0 }) => this.handleJumpToLine(line, offset),
+      ),
+    ];
 
-    this.unsubscribeFromCellsEvents = globalPubSub.subscribe("cells", (event) =>
-      this.handleCellsEvent(event)
-    );
+    // DOM events
 
-    this.unsubscribeFromCellEvents = globalPubSub.subscribe(
-      `cells:${this.props.cellId}`,
-      (event) => this.handleCellEvent(event)
+    this._handleViewportResize = this.handleViewportResize.bind(this);
+    window.visualViewport.addEventListener(
+      "resize",
+      this._handleViewportResize,
     );
   },
 
@@ -96,9 +120,12 @@ const Cell = {
   },
 
   destroyed() {
-    this.unsubscribeFromNavigationEvents();
-    this.unsubscribeFromCellsEvents();
-    this.unsubscribeFromCellEvents();
+    this.subscriptions.forEach((subscription) => subscription.destroy());
+
+    window.visualViewport.removeEventListener(
+      "resize",
+      this._handleViewportResize,
+    );
   },
 
   updated() {
@@ -111,45 +138,14 @@ const Cell = {
   },
 
   getProps() {
-    return {
-      cellId: getAttributeOrThrow(this.el, "data-cell-id"),
-      type: getAttributeOrThrow(this.el, "data-type"),
-      sessionPath: getAttributeOrThrow(this.el, "data-session-path"),
-      evaluationDigest: getAttributeOrDefault(
-        this.el,
-        "data-evaluation-digest",
-        null
-      ),
-      smartCellJSViewRef: getAttributeOrDefault(
-        this.el,
-        "data-smart-cell-js-view-ref",
-        null
-      ),
-    };
-  },
-
-  handleNavigationEvent(event) {
-    if (event.type === "element_focused") {
-      this.handleElementFocused(event.focusableId, event.scroll);
-    } else if (event.type === "insert_mode_changed") {
-      this.handleInsertModeChanged(event.enabled);
-    } else if (event.type === "location_report") {
-      this.handleLocationReport(event.client, event.report);
-    }
-  },
-
-  handleCellsEvent(event) {
-    if (event.type === "cell_moved") {
-      this.handleCellMoved(event.cellId);
-    } else if (event.type === "cell_upload") {
-      this.handleCellUpload(event.cellId, event.url);
-    }
-  },
-
-  handleCellEvent(event) {
-    if (event.type === "dispatch_queue_evaluation") {
-      this.handleDispatchQueueEvaluation(event.dispatch);
-    }
+    return parseHookProps(this.el, [
+      "cell-id",
+      "type",
+      "session-path",
+      "evaluation-digest",
+      "smart-cell-js-view-ref",
+      "allowed-uri-schemes",
+    ]);
   },
 
   handleElementFocused(focusableId, scroll) {
@@ -170,33 +166,43 @@ const Cell = {
 
     this.updateInsertModeAvailability();
 
-    if (this.props.type !== "markdown") {
-      // For markdown cells the editor is mounted lazily when needed,
-      // for other cells we mount the editor eagerly, however mounting
-      // is a synchronous operation and is relatively expensive, so we
-      // defer it to run after the current event handlers
-      setTimeout(() => {
-        if (!liveEditor.isMounted()) {
-          liveEditor.mount();
-        }
-      }, 0);
-    }
-
     if (liveEditor === this.currentEditor()) {
       // Once the editor is created, reflect the current insert mode state
-      this.maybeFocusCurrentEditor(true);
+      this.maybeFocusCurrentEditor();
     }
 
     liveEditor.onBlur(() => {
-      // Prevent from blurring unless the state changes. For example
-      // when we move cell using buttons the editor should keep focus
-      if (this.isFocused && this.insertMode) {
-        this.currentEditor().focus();
-      }
+      // We defer the check to happen after all focus/click events have
+      // been processed, in case the state changes as a result
+      setTimeout(() => {
+        // Prevent from blurring unless the state changes. For example
+        // when we move cell using buttons the editor should keep focus
+        if (this.isFocused && this.insertMode) {
+          this.currentEditor().focus();
+        }
+      }, 0);
     });
 
-    liveEditor.onCursorSelectionChange((selection) => {
-      this.broadcastSelection(selection);
+    liveEditor.onFocus(() => {
+      // We defer the check to happen after all focus/click events have
+      // been processed, in case the state changes as a result
+      setTimeout(() => {
+        // Prevent from focusing unless the state changes. The editor
+        // uses a contenteditable element, and it may accidentally get
+        // focus. In Chrome clicking on the right-side of the editor
+        // gives it focus
+        if (!this.isFocused || !this.insertMode) {
+          this.currentEditor().blur();
+        } else {
+          this.sendCursorHistory();
+        }
+      }, 0);
+    });
+
+    liveEditor.onSelectionChange(() => {
+      if (this.isFocused) {
+        this.sendCursorHistory();
+      }
     });
 
     if (tag === "primary") {
@@ -211,11 +217,12 @@ const Cell = {
       // Setup markdown rendering
       if (this.props.type === "markdown") {
         const markdownContainer = this.el.querySelector(
-          `[data-el-markdown-container]`
+          `[data-el-markdown-container]`,
         );
         const markdown = new Markdown(markdownContainer, source, {
           baseUrl: this.props.sessionPath,
           emptyText: "Empty markdown cell",
+          allowedUriSchemes: this.props.allowedUriSchemes,
         });
 
         liveEditor.onChange((newSource) => {
@@ -233,16 +240,38 @@ const Cell = {
 
         this.handleEvent(
           `evaluation_finished:${this.props.cellId}`,
-          ({ code_error }) => {
-            liveEditor.setCodeErrorMarker(code_error);
-          }
+          ({ code_markers }) => {
+            liveEditor.setCodeMarkers(code_markers);
+          },
         );
+
+        this.handleEvent(`start_evaluation:${this.props.cellId}`, () => {
+          liveEditor.clearDoctests();
+        });
+
+        this.handleEvent(
+          `doctest_report:${this.props.cellId}`,
+          (doctestReport) => {
+            liveEditor.updateDoctests([doctestReport]);
+          },
+        );
+
+        this.handleEvent(`erase_outputs`, () => {
+          liveEditor.setCodeMarkers([]);
+          liveEditor.clearDoctests();
+        });
       }
     }
   },
 
   handleCellEditorRemoved(tag) {
     delete this.liveEditors[tag];
+  },
+
+  handleViewportResize() {
+    if (this.isFocused) {
+      this.scrollEditorCursorIntoViewIfNeeded();
+    }
   },
 
   currentEditor() {
@@ -261,21 +290,13 @@ const Cell = {
   updateInsertModeAvailability() {
     this.el.toggleAttribute(
       "data-js-insert-mode-disabled",
-      !this.currentEditor()
+      !this.currentEditor(),
     );
   },
 
-  maybeFocusCurrentEditor(scroll = false) {
+  maybeFocusCurrentEditor() {
     if (this.isFocused && this.insertMode) {
       this.currentEditor().focus();
-
-      if (scroll) {
-        // If the element is being scrolled to, focus interrupts it,
-        // so ensure the scrolling continues.
-        smoothlyScrollToElement(this.el);
-      }
-
-      this.broadcastSelection();
     }
   },
 
@@ -295,27 +316,15 @@ const Cell = {
   handleInsertModeChanged(insertMode) {
     if (this.isFocused && !this.insertMode && insertMode) {
       this.insertMode = insertMode;
+      this.el.setAttribute("data-js-insert-mode", "");
 
       if (this.currentEditor()) {
         this.currentEditor().focus();
-
-        // The insert mode may be enabled as a result of clicking the editor,
-        // in which case we want to wait until editor handles the click and
-        // sets new cursor position. To achieve this, we simply put this task
-        // at the end of event loop, ensuring the editor mousedown handler is
-        // executed first
-        setTimeout(() => {
-          scrollIntoView(document.activeElement, {
-            scrollMode: "if-needed",
-            behavior: "smooth",
-            block: "center",
-          });
-        }, 0);
-
-        this.broadcastSelection();
+        this.scrollEditorCursorIntoViewIfNeeded();
       }
     } else if (this.insertMode && !insertMode) {
       this.insertMode = insertMode;
+      this.el.removeAttribute("data-js-insert-mode");
 
       if (this.currentEditor()) {
         this.currentEditor().blur();
@@ -329,24 +338,10 @@ const Cell = {
     }
   },
 
-  handleCellUpload(cellId, url) {
-    const liveEditor = this.liveEditors.primary;
-
-    if (!liveEditor) {
-      return;
-    }
-
-    if (this.props.cellId === cellId) {
-      const markdown = `![](${url})`;
-      liveEditor.insert(markdown);
-    }
-  },
-
   handleDispatchQueueEvaluation(dispatch) {
-    if (this.props.type === "smart" && this.props.smartCellJSViewRef) {
+    if (this.props.type === "smart" && this.props.smartCellJsViewRef) {
       // Ensure the smart cell UI is reflected on the server, before the evaluation
-      globalPubSub.broadcast(`js_views:${this.props.smartCellJSViewRef}`, {
-        type: "sync",
+      globalPubsub.broadcast(`js_views:${this.props.smartCellJsViewRef}:sync`, {
         callback: dispatch,
       });
     } else {
@@ -354,37 +349,34 @@ const Cell = {
     }
   },
 
-  handleLocationReport(client, report) {
-    Object.entries(this.liveEditors).forEach(([tag, liveEditor]) => {
-      if (
-        this.props.cellId === report.focusableId &&
-        report.selection &&
-        report.selection.tag === tag
-      ) {
-        liveEditor.updateUserSelection(
-          client,
-          report.selection.editorSelection
-        );
-      } else {
-        liveEditor.removeUserSelection(client);
-      }
+  handleJumpToLine(line, offset) {
+    if (this.isFocused) {
+      this.currentEditor().moveCursorToLine(line, offset);
+    }
+  },
+
+  scrollEditorCursorIntoViewIfNeeded() {
+    const element = this.currentEditor().getElementAtCursor();
+
+    // Scroll to the cursor, positioning it near the top of the viewport
+    withStyle(element, { scrollMarginTop: "128px" }, () => {
+      scrollIntoView(element, {
+        scrollMode: "if-needed",
+        behavior: "instant",
+        block: "start",
+      });
     });
   },
 
-  broadcastSelection(editorSelection = null) {
-    editorSelection =
-      editorSelection || this.currentEditor().editor.getSelection();
+  sendCursorHistory() {
+    const cursor = this.currentEditor().getCurrentCursorPosition();
+    if (cursor === null) return;
 
-    const tag = this.currentEditorTag();
-
-    // Report new selection only if this cell is in insert mode
-    if (this.isFocused && this.insertMode) {
-      globalPubSub.broadcast("session", {
-        type: "cursor_selection_changed",
-        focusableId: this.props.cellId,
-        selection: { tag, editorSelection },
-      });
-    }
+    globalPubsub.broadcast("navigation:cursor_moved", {
+      line: cursor.line,
+      offset: cursor.offset,
+      cellId: this.props.cellId,
+    });
   },
 };
 

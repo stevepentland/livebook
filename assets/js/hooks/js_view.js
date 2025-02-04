@@ -1,10 +1,11 @@
+import { parseHookProps } from "../lib/attribute";
 import {
-  getAttributeOrDefault,
-  getAttributeOrThrow,
-  parseInteger,
-} from "../lib/attribute";
-import { isElementHidden, randomId, randomToken } from "../lib/utils";
-import { globalPubSub } from "../lib/pub_sub";
+  isElementHidden,
+  randomId,
+  randomToken,
+  waitUntilInViewport,
+} from "../lib/utils";
+import { globalPubsub } from "../lib/pubsub";
 import {
   getChannel,
   transportDecode,
@@ -31,28 +32,31 @@ import { initializeIframeSource } from "./js_view/iframe";
  * Then, a number of `event:<ref>` with `{ event, payload }` payload
  * can be sent. The `event` is forwarded to the initialized component.
  *
- * ## Configuration
+ * ## Props
  *
- *   * `data-ref` - a unique identifier used as messages scope
+ *   * `ref` - a unique identifier used as messages scope
  *
- *   * `data-assets-base-path` - the path to resolve all relative paths
- *     against in the iframe
+ *   * `assets-base-path` - the base path to fetch assets from
+ *     within the iframe (and resolve all relative paths against)
  *
- *   * `data-js-path` - a relative path for the initial view-specific
+ *   * `assets-cdn-url` - a URL to CDN location to fetch assets
+ *     from. Only used if specified and the entrypoint script can be
+ *     successfully accessed, also only when Livebook runs on https
+ *
+ *   * `js-path` - a relative path for the initial view-specific
  *     JS module
  *
- *   * `data-session-token` - token is sent in the "connect" message
- *     to the channel
+ *   * `session-token` - a session-specific token passed when
+ *     joining the JS view channel
  *
- *   * `data-session-id` - the identifier of the session that this
- *     view belongs go
+ *   * `connect-token` - a JS view specific token passed in the
+ *     "connect" message to the channel
  *
- *   * `data-iframe-local-port` - the local port where the iframe is
- *     served
+ *   * `iframe-port` - the local port where the iframe is served
  *
- *   * `data-iframe-url` - an optional location to load the iframe from
+ *   * `iframe-url` - an optional location to load the iframe from
  *
- *   * `data-timeout-message` - the message to show when the initial
+ *   * `timeout-message` - the message to show when the initial
  *     data does not load
  *
  */
@@ -70,9 +74,9 @@ const JSView = {
 
     this.initTimeout = setTimeout(() => this.handleInitTimeout(), 2_000);
 
-    this.channel = getChannel(this.props.sessionId);
+    this.channel = getChannel(this.props.sessionToken);
 
-    this.removeIframe = this.createIframe();
+    this.iframeActions = this.createIframe();
 
     // Setup child communication
     this.childReadyPromise = new Promise((resolve, reject) => {
@@ -89,7 +93,9 @@ const JSView = {
     this.hiddenInput.style.display = "none";
     this.el.appendChild(this.hiddenInput);
 
-    this.loadIframe();
+    this.iframeActions.visibilityPromise.then(() => {
+      this.loadIframe();
+    });
 
     // Channel events
 
@@ -98,7 +104,7 @@ const JSView = {
       (raw) => {
         const [, payload] = transportDecode(raw);
         this.handleServerInit(payload);
-      }
+      },
     );
 
     const eventRef = this.channel.on(`event:${this.props.ref}`, (raw) => {
@@ -110,7 +116,7 @@ const JSView = {
       `error:${this.props.ref}`,
       ({ message, init }) => {
         this.handleServerError(message, init);
-      }
+      },
     );
 
     const pongRef = this.channel.on(`pong:${this.props.ref}`, () => {
@@ -124,21 +130,30 @@ const JSView = {
       this.channel.off(`pong:${this.props.ref}`, pongRef);
     };
 
-    this.unsubscribeFromJSViewEvents = globalPubSub.subscribe(
-      `js_views:${this.props.ref}`,
-      (event) => this.handleJSViewEvent(event)
-    );
+    this.subscriptions = [
+      globalPubsub.subscribe(
+        `js_views:${this.props.ref}:sync`,
+        ({ callback }) => this.handleSync(callback),
+      ),
+      globalPubsub.subscribe(
+        `js_views:${this.props.ref}:secret_selected`,
+        ({ secretName }) => this.handleSecretSelected(secretName),
+      ),
+      globalPubsub.subscribe("navigation:focus_changed", ({ focusableId }) =>
+        this.handleElementFocused(focusableId),
+      ),
+    ];
 
     this.channel.push(
       "connect",
       {
-        session_token: this.props.sessionToken,
+        connect_token: this.props.connectToken,
         ref: this.props.ref,
         id: this.id,
       },
       // If the client is very busy with executing JS we may reach the
       // default timeout of 10s, so we increase it
-      30_000
+      30_000,
     );
   },
 
@@ -146,32 +161,34 @@ const JSView = {
     this.props = this.getProps(this);
   },
 
+  disconnected() {
+    // Reinitialize on reconnection
+    this.el.removeAttribute("id");
+  },
+
   destroyed() {
     window.removeEventListener("message", this._handleWindowMessage);
 
-    this.removeIframe();
+    this.iframeActions.remove();
 
     this.unsubscribeFromChannelEvents();
     this.channel.push("disconnect", { ref: this.props.ref });
 
-    this.unsubscribeFromJSViewEvents();
+    this.subscriptions.forEach((subscription) => subscription.destroy());
   },
 
   getProps() {
-    return {
-      ref: getAttributeOrThrow(this.el, "data-ref"),
-      assetsBasePath: getAttributeOrThrow(this.el, "data-assets-base-path"),
-      jsPath: getAttributeOrThrow(this.el, "data-js-path"),
-      sessionToken: getAttributeOrThrow(this.el, "data-session-token"),
-      sessionId: getAttributeOrThrow(this.el, "data-session-id"),
-      iframePort: getAttributeOrThrow(
-        this.el,
-        "data-iframe-local-port",
-        parseInteger
-      ),
-      iframeUrl: getAttributeOrDefault(this.el, "data-iframe-url", null),
-      timeoutMessage: getAttributeOrThrow(this.el, "data-timeout-message"),
-    };
+    return parseHookProps(this.el, [
+      "ref",
+      "assets-base-path",
+      "assets-cdn-url",
+      "js-path",
+      "session-token",
+      "connect-token",
+      "iframe-port",
+      "iframe-url",
+      "timeout-message",
+    ]);
   },
 
   createIframe() {
@@ -199,32 +216,45 @@ const JSView = {
 
     const notebookEl = document.querySelector(`[data-el-notebook]`);
     const notebookContentEl = notebookEl.querySelector(
-      `[data-el-notebook-content]`
+      `[data-el-notebook-content]`,
     );
 
-    // Most placeholder position changes are accompanied by changes to the
-    // notebook content element height (adding cells, inserting newlines
-    // in the editor, etc). On the other hand, toggling the sidebar or
-    // resizing the window changes the width, however the notebook
-    // content element doesn't span full width, so this change may not
-    // be detected, that's why we observe the full-width parent element
+    // Most placeholder position changes are accompanied by changes
+    // to the notebook content element height (adding cells, inserting
+    // newlines in the editor, etc). On the other hand, toggling the
+    // sidebar or resizing the window changes the width, however the
+    // notebook content element doesn't span full width, so this change
+    // may not be detected, that's why we observe the full-width parent
+    // element as well
     const resizeObserver = new ResizeObserver((entries) => {
       this.repositionIframe();
     });
     resizeObserver.observe(notebookContentEl);
     resizeObserver.observe(notebookEl);
 
-    // On lower level cell/section reordering is applied as element
-    // removal followed by insert, consequently the intersection
-    // between the placeholder and notebook content changes (becomes
-    // none for a brief moment)
-    const intersectionObserver = new IntersectionObserver(
-      (entries) => {
+    // The placeholder may be hidden, in which case we want to hide
+    // the iframe as well. This could be the case when viewing the
+    // Smart cell source or in tabs output. It is possible that the
+    // change does not actually change the notebook height, so we
+    // also watch the placeholder directly
+    let isPlaceholderHidden = isElementHidden(this.iframePlaceholder);
+    const placeholderResizeObserver = new ResizeObserver((entries) => {
+      let isPlaceholderHiddenNow = isElementHidden(this.iframePlaceholder);
+      if (isPlaceholderHidden !== isPlaceholderHiddenNow) {
+        isPlaceholderHidden = isPlaceholderHiddenNow;
         this.repositionIframe();
-      },
-      { root: notebookContentEl }
+      }
+    });
+    placeholderResizeObserver.observe(this.iframePlaceholder);
+
+    // On certain events, like section/cell moved, a global event is
+    // dispatched to trigger reposition. This way we don't need to
+    // use deep MutationObserver, which would be expensive, especially
+    // with code editor
+    const jsViewSubscription = globalPubsub.subscribe(
+      "js_views:reposition",
+      (event) => this.repositionIframe(),
     );
-    intersectionObserver.observe(this.iframePlaceholder);
 
     // Emulate mouse enter and leave on the placeholder. Note that we
     // intentionally use bubbling to notify all parents that may have
@@ -232,21 +262,43 @@ const JSView = {
 
     this.iframe.addEventListener("mouseenter", (event) => {
       this.iframePlaceholder.dispatchEvent(
-        new MouseEvent("mouseenter", { bubbles: true })
+        new MouseEvent("mouseenter", { bubbles: true }),
       );
     });
 
     this.iframe.addEventListener("mouseleave", (event) => {
       this.iframePlaceholder.dispatchEvent(
-        new MouseEvent("mouseleave", { bubbles: true })
+        new MouseEvent("mouseleave", { bubbles: true }),
       );
     });
 
-    return () => {
+    // We detect when the placeholder enters viewport and becomes visible,
+    // based on that we can load the iframe contents lazily
+
+    const visibility = waitUntilInViewport(this.iframePlaceholder, {
+      root: notebookEl,
+      proximity: 2000,
+    });
+
+    // Reflect focus based on whether there is a focused parent, this
+    // is later synced on "element_focused" events
+    this.iframe.toggleAttribute(
+      "data-js-focused",
+      !!this.el.closest(`[data-js-focused]`),
+    );
+
+    // Cleanup
+
+    const remove = () => {
       resizeObserver.disconnect();
-      intersectionObserver.disconnect();
+      placeholderResizeObserver.disconnect();
+      jsViewSubscription.destroy();
+      visibility.cancel();
       this.iframe.remove();
+      this.iframePlaceholder.remove();
     };
+
+    return { visibilityPromise: visibility.promise, remove };
   },
 
   repositionIframe() {
@@ -275,7 +327,7 @@ const JSView = {
     initializeIframeSource(
       this.iframe,
       this.props.iframePort,
-      this.props.iframeUrl
+      this.props.iframeUrl,
     ).then(() => {
       iframesEl.appendChild(this.iframe);
     });
@@ -283,17 +335,17 @@ const JSView = {
 
   handleChildMessage(message, onReady) {
     if (message.type === "ready" && !this.childReady) {
-      const assetsBaseUrl = window.location.origin + this.props.assetsBasePath;
+      this.getAssetsBaseUrl().then((assetsBaseUrl) => {
+        this.postMessage({
+          type: "readyReply",
+          token: this.childToken,
+          baseUrl: assetsBaseUrl,
+          jsPath: this.props.jsPath,
+        });
 
-      this.postMessage({
-        type: "readyReply",
-        token: this.childToken,
-        baseUrl: assetsBaseUrl,
-        jsPath: this.props.jsPath,
+        this.childReady = true;
+        onReady();
       });
-
-      this.childReady = true;
-      onReady();
     } else {
       // Note: we use a random token to authorize child messages
       // and do our best to make this token unavailable for the
@@ -325,8 +377,29 @@ const JSView = {
       } else if (message.type === "syncReply") {
         this.pongCallbackQueue.push(this.syncCallbackQueue.shift());
         this.channel.push("ping", { ref: this.props.ref });
+      } else if (message.type === "selectSecret") {
+        this.pushEvent("select_secret", {
+          js_view_ref: this.props.ref,
+          preselect_name: message.preselectName,
+          options: message.options,
+        });
       }
     }
+  },
+
+  getAssetsBaseUrl() {
+    // Livebook may be running behind an authentication proxy, in
+    // which case the internal assets URL is not accessible from
+    // within the iframe (served from a different origin). To
+    // workaround this, we fallback to a CDN for the assets if
+    // available for the given package.
+    return cachedPublicEndpointCheck().then((isPublicAccessible) => {
+      if (!isPublicAccessible && this.props.assetsCdnUrl) {
+        return this.props.assetsCdnUrl;
+      } else {
+        return window.location.origin + this.props.assetsBasePath;
+      }
+    });
   },
 
   postMessage(message) {
@@ -396,15 +469,52 @@ const JSView = {
     callback();
   },
 
-  handleJSViewEvent(event) {
-    if (event.type === "sync") {
-      // First, we invoke optional synchronization callback in the iframe,
-      // that may send any deferred UI changes to the server. Then, we
-      // do a ping to synchronize with the server
-      this.syncCallbackQueue.push(event.callback);
-      this.postMessage({ type: "sync" });
-    }
+  handleSync(callback) {
+    // First, we invoke optional synchronization callback in the iframe,
+    // that may send any deferred UI changes to the server. Then, we
+    // do a ping to synchronize with the server
+    this.syncCallbackQueue.push(callback);
+    this.postMessage({ type: "sync" });
+  },
+
+  handleSecretSelected(secretName) {
+    this.postMessage({ type: "secretSelected", secretName });
+  },
+
+  handleElementFocused(focusableId) {
+    // If a parent focusable element is focused, mirror the attribute
+    // to the iframe element. This way if we need to apply style rules
+    // (such as opacity) to focused elements, we can target the iframe
+    // elements placed elsewhere in the DOM
+
+    const parentFocusableEl = this.el.closest(`[data-focusable-id]`);
+    const parentFocusableId = parentFocusableEl
+      ? parentFocusableEl.dataset.focusableId
+      : null;
+
+    this.iframe.toggleAttribute(
+      "data-js-focused",
+      parentFocusableId === focusableId,
+    );
   },
 };
+
+/**
+ * Checks if Livebook public endpoint is accessible without auth cookies.
+ *
+ * Returns a promise that resolves to a boolean. The request is sent only
+ * once and the response is cached.
+ */
+function cachedPublicEndpointCheck() {
+  const healthUrl = window.LIVEBOOK_PUBLIC_BASE_URL_PATH + "/public/health";
+
+  cachedPublicEndpointCheck.promise =
+    cachedPublicEndpointCheck.promise ||
+    fetch(healthUrl)
+      .then((response) => response.status === 200)
+      .catch((error) => false);
+
+  return cachedPublicEndpointCheck.promise;
+}
 
 export default JSView;

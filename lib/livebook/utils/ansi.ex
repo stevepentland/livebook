@@ -1,6 +1,4 @@
 defmodule Livebook.Utils.ANSI do
-  @moduledoc false
-
   @type modifiers :: list(modifier())
 
   @type modifier ::
@@ -31,14 +29,15 @@ defmodule Livebook.Utils.ANSI do
           | :light_white
 
   @doc """
-  Takes a string with ANSI escape codes and parses it
-  into a list of `{modifiers, string}` parts.
+  Takes a string with ANSI escape codes and parses it into a list of
+  `{modifiers, string}` parts.
 
   Also returns the final modifiers.
 
   ## Options
 
     * `:modifiers` - a list with initial modifiers
+
   """
   @spec parse_ansi_string(String.t(), keyword()) :: {list({modifiers(), String.t()}), modifiers()}
   def parse_ansi_string(string, opts \\ []) do
