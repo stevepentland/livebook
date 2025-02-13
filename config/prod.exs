@@ -2,7 +2,11 @@ import Config
 
 # Default bind and port for production
 config :livebook, LivebookWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 8080],
+  http: [
+    ip: {127, 0, 0, 1},
+    port: 8080,
+    http_1_options: [max_header_length: 32768]
+  ],
   server: true
 
 config :livebook, :iframe_port, 8081

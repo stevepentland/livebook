@@ -8,23 +8,23 @@ import Config
 config :livebook, LivebookWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}, port: 4000],
+  http: [
+    ip: {127, 0, 0, 1},
+    port: 4000,
+    http_1_options: [max_header_length: 32768]
+  ],
   code_reloader: true,
   debug_errors: true,
   check_origin: false,
   watchers: [
-    node: [
-      "node_modules/webpack/bin/webpack.js",
-      "--mode",
-      "development",
-      "--watch",
-      "--watch-options-stdin",
-      cd: Path.expand("../assets", __DIR__)
-    ]
+    # We invoke node rather than an npm task, so that it works on Windows
+    node: ["build.js", "--watch", cd: Path.expand("../assets", __DIR__)]
   ]
 
-config :livebook, :iframe_port, 4001
-config :livebook, :shutdown_enabled, true
+config :livebook,
+  iframe_port: 4001,
+  shutdown_callback: {System, :stop, []},
+  warn_on_live_teams_server: true
 
 # ## SSL Support
 #
@@ -55,22 +55,26 @@ config :livebook, LivebookWeb.Endpoint,
   live_reload: [
     patterns: [
       ~r"tmp/static_dev/.*(js|css|png|jpeg|jpg|gif|svg)$",
-      ~r"lib/livebook_web/(live|views)/.*(ex)$",
+      ~r"lib/livebook_web/(live|views|components)/.*(ex)$",
       ~r"lib/livebook_web/templates/.*(eex)$"
-    ]
+    ],
+    web_console_logger: true
   ]
 
-# Do not include metadata nor timestamps in development logs
-config :logger, :console, format: "[$level] $message\n"
+# Do not include timestamps in development logs
+config :logger, :console,
+  format: "$metadata[$level] $message\n",
+  metadata: []
+
+# Include HEEx debug annotations as HTML comments in rendered markup
+config :phoenix_live_view, :debug_heex_annotations, true
 
 # Set a higher stacktrace during development. Avoid configuring such
 # in production as building large stacktraces may be expensive.
-config :phoenix, :stacktrace_depth, 20
+config :phoenix,
+  stacktrace_depth: 20,
+  plug_init_mode: :runtime
 
-# Initialize plugs at runtime for faster development compilation
-config :phoenix, :plug_init_mode, :runtime
-
-# Disable authentication mode during dev
-config :livebook, :authentication_mode, :disabled
-
-config :livebook, :data_path, Path.expand("tmp/livebook_data/dev")
+config :livebook,
+  authentication: :disabled,
+  data_path: Path.expand("tmp/livebook_data/dev")

@@ -8,14 +8,14 @@ defmodule LivebookWeb.JSViewChannelTest do
       LivebookWeb.Socket
       |> socket()
       |> subscribe_and_join(LivebookWeb.JSViewChannel, "js_view", %{
-        "session_id" => session_id
+        "session_token" => session_token(session_id, Livebook.Utils.random_long_id())
       })
 
     %{socket: socket}
   end
 
   test "loads initial data from the widget server and pushes to the client", %{socket: socket} do
-    push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id1"})
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
 
     assert_receive {:connect, from, %{}}
     send(from, {:connect_reply, [1, 2, 3], %{ref: "1"}})
@@ -24,8 +24,8 @@ defmodule LivebookWeb.JSViewChannelTest do
   end
 
   test "loads initial data for multiple connections separately", %{socket: socket} do
-    push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id1"})
-    push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id2"})
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id2"})
 
     assert_receive {:connect, from, %{}}
     send(from, {:connect_reply, [1, 2, 3], %{ref: "1"}})
@@ -37,7 +37,7 @@ defmodule LivebookWeb.JSViewChannelTest do
   end
 
   test "sends client events to the corresponding widget server", %{socket: socket} do
-    push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id1"})
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
 
     assert_receive {:connect, from, %{}}
     send(from, {:connect_reply, [1, 2, 3], %{ref: "1"}})
@@ -47,9 +47,27 @@ defmodule LivebookWeb.JSViewChannelTest do
     assert_receive {:event, "ping", [1, 2, 3], %{origin: _origin}}
   end
 
+  test "sends server events to the target client", %{socket: socket} do
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
+
+    assert_receive {:connect, from, %{}}
+    send(from, {:connect_reply, [1, 2, 3], %{ref: "1"}})
+
+    send(from, {:event, "ping", [1, 2, 3], %{ref: "1"}})
+    assert_push "event:1", %{"root" => [["ping"], [1, 2, 3]]}
+  end
+
+  test "ignores client events when no connection is found", %{socket: socket} do
+    push(socket, "event", %{"root" => [["ping", "1"], [1, 2, 3]]})
+
+    # The channel should still be operational
+    push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
+    assert_receive {:connect, _from, %{}}
+  end
+
   describe "binary payload" do
     test "initial data", %{socket: socket} do
-      push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id1"})
+      push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
 
       assert_receive {:connect, from, %{}}
       payload = {:binary, %{message: "hey"}, <<1, 2, 3>>}
@@ -60,7 +78,7 @@ defmodule LivebookWeb.JSViewChannelTest do
     end
 
     test "form client to server", %{socket: socket} do
-      push(socket, "connect", %{"session_token" => session_token(), "ref" => "1", "id" => "id1"})
+      push(socket, "connect", %{"connect_token" => connect_token(), "ref" => "1", "id" => "id1"})
 
       assert_receive {:connect, from, %{}}
       send(from, {:connect_reply, [1, 2, 3], %{ref: "1"}})
@@ -73,7 +91,14 @@ defmodule LivebookWeb.JSViewChannelTest do
     end
   end
 
-  defp session_token() do
-    Phoenix.Token.sign(LivebookWeb.Endpoint, "js view", %{pid: self()})
+  defp session_token(session_id, client_id) do
+    Phoenix.Token.sign(LivebookWeb.Endpoint, "session", %{
+      session_id: session_id,
+      client_id: client_id
+    })
+  end
+
+  defp connect_token() do
+    Phoenix.Token.sign(LivebookWeb.Endpoint, "js-view-connect", %{pid: self()})
   end
 end

@@ -1,6 +1,4 @@
 defmodule LivebookCLI.Server do
-  @moduledoc false
-
   @behaviour LivebookCLI.Task
 
   @external_resource "README.md"
@@ -20,14 +18,17 @@ defmodule LivebookCLI.Server do
     An optional open-command can be given as argument. It will open
     up a browser window according these rules:
 
-      * If the open-command is "new", the browser window will point
+      * If the open-command is "@home", the browser window will point
+        to the home page
+
+      * If the open-command is "@new", the browser window will point
         to a new notebook
 
       * If the open-command is a URL, the notebook at the given URL
         will be imported
 
       * If the open-command is a directory, the browser window will point
-        to the home page with the directory selected
+        to the open page with the directory selected
 
       * If the open-command is a notebook file, the browser window will point
         to the opened notebook
@@ -39,23 +40,10 @@ defmodule LivebookCLI.Server do
     ## Available options
 
       --cookie             Sets a cookie for the app distributed node
-      --data-path          The directory to store Livebook configuration,
-                           defaults to "livebook" under the default user data directory
-      --default-runtime    Sets the runtime type that is used by default when none is started
-                           explicitly for the given notebook, defaults to standalone
-                           Supported options:
-                             * standalone - Elixir standalone
-                             * mix[:PATH][:FLAGS] - Mix standalone
-                             * attached:NODE:COOKIE - Attached
-                             * embedded - Embedded
-      --home               The home path for the Livebook instance
       --ip                 The ip address to start the web application on, defaults to 127.0.0.1
                            Must be a valid IPv4 or IPv6 address
-      --name               Set a name for the app distributed node
-      --no-token           Disable token authentication, enabled by default
-                           If LIVEBOOK_PASSWORD is set, it takes precedence over token auth
+      --name               Sets a name for the app distributed node
       -p, --port           The port to start the web application on, defaults to 8080
-      --sname              Set a short name for the app distributed node
 
     The --help option can be given to print this notice.
 
@@ -71,7 +59,7 @@ defmodule LivebookCLI.Server do
 
     Starts a server and opens up a browser at a new notebook:
 
-        livebook server new
+        livebook server @new
 
     Starts a server and imports the notebook at the given URL:
 
@@ -137,21 +125,20 @@ defmodule LivebookCLI.Server do
   end
 
   defp check_endpoint_availability(base_url) do
-    Application.ensure_all_started(:inets)
+    Application.ensure_all_started(:req)
 
     health_url = set_path(base_url, "/public/health")
 
-    case Livebook.Utils.HTTP.request(:get, health_url) do
-      {:ok, status, _headers, body} ->
-        with 200 <- status,
-             {:ok, body} <- Jason.decode(body),
-             %{"application" => "livebook"} <- body do
-          :livebook_running
-        else
-          _ -> :taken
-        end
+    req = Req.new() |> Livebook.Utils.req_attach_defaults()
 
-      {:error, _error} ->
+    case Req.get(req, url: health_url, retry: false) do
+      {:ok, %{status: 200, body: %{"application" => "livebook"}}} ->
+        :livebook_running
+
+      {:ok, _other} ->
+        :taken
+
+      {:error, _exception} ->
         :available
     end
   end
@@ -160,10 +147,19 @@ defmodule LivebookCLI.Server do
     :ok
   end
 
-  defp open_from_args(base_url, ["new"]) do
+  defp open_from_args(base_url, ["@home"]) do
+    Livebook.Utils.browser_open(base_url)
+  end
+
+  defp open_from_args(base_url, ["@new"]) do
     base_url
-    |> set_path("/explore/notebooks/new")
+    |> set_path("/new")
     |> Livebook.Utils.browser_open()
+  end
+
+  defp open_from_args(base_url, ["new"]) do
+    IO.warn(~s/passing "new" as an argument is deprecated, use "@new" instead/, [])
+    open_from_args(base_url, ["@new"])
   end
 
   defp open_from_args(base_url, [url_or_file_or_dir]) do
@@ -176,14 +172,9 @@ defmodule LivebookCLI.Server do
         |> Livebook.Utils.notebook_import_url(url_or_file_or_dir)
         |> Livebook.Utils.browser_open()
 
-      File.regular?(path) ->
+      File.regular?(path) or File.dir?(path) ->
         base_url
         |> Livebook.Utils.notebook_open_url(url_or_file_or_dir)
-        |> Livebook.Utils.browser_open()
-
-      File.dir?(path) ->
-        base_url
-        |> update_query(%{"path" => path})
         |> Livebook.Utils.browser_open()
 
       true ->
@@ -198,15 +189,11 @@ defmodule LivebookCLI.Server do
   end
 
   @switches [
-    data_path: :string,
     cookie: :string,
-    default_runtime: :string,
     ip: :string,
     name: :string,
     port: :integer,
-    home: :string,
-    sname: :string,
-    token: :boolean
+    home: :string
   ]
 
   @aliases [
@@ -214,26 +201,10 @@ defmodule LivebookCLI.Server do
   ]
 
   defp args_to_options(args) do
-    {opts, extra_args} = OptionParser.parse!(args, strict: @switches, aliases: @aliases)
-    validate_options!(opts)
-    {opts, extra_args}
-  end
-
-  defp validate_options!(opts) do
-    if Keyword.has_key?(opts, :name) and Keyword.has_key?(opts, :sname) do
-      raise "the provided --sname and --name options are mutually exclusive, please specify only one of them"
-    end
+    OptionParser.parse!(args, strict: @switches, aliases: @aliases)
   end
 
   defp opts_to_config([], config), do: config
-
-  defp opts_to_config([{:token, false} | opts], config) do
-    if Livebook.Config.auth_mode() == :token do
-      opts_to_config(opts, [{:livebook, :authentication_mode, :disabled} | config])
-    else
-      opts_to_config(opts, config)
-    end
-  end
 
   defp opts_to_config([{:port, port} | opts], config) do
     opts_to_config(opts, [{:livebook, LivebookWeb.Endpoint, http: [port: port]} | config])
@@ -248,34 +219,14 @@ defmodule LivebookCLI.Server do
     ])
   end
 
-  defp opts_to_config([{:home, home} | opts], config) do
-    home = Livebook.Config.writable_dir!("--home", home)
-    opts_to_config(opts, [{:livebook, :home, home} | config])
-  end
-
-  defp opts_to_config([{:sname, sname} | opts], config) do
-    sname = String.to_atom(sname)
-    opts_to_config(opts, [{:livebook, :node, {:shortnames, sname}} | config])
-  end
-
   defp opts_to_config([{:name, name} | opts], config) do
     name = String.to_atom(name)
-    opts_to_config(opts, [{:livebook, :node, {:longnames, name}} | config])
+    opts_to_config(opts, [{:livebook, :node, name} | config])
   end
 
   defp opts_to_config([{:cookie, cookie} | opts], config) do
     cookie = String.to_atom(cookie)
     opts_to_config(opts, [{:livebook, :cookie, cookie} | config])
-  end
-
-  defp opts_to_config([{:default_runtime, default_runtime} | opts], config) do
-    default_runtime = Livebook.Config.default_runtime!("--default-runtime", default_runtime)
-    opts_to_config(opts, [{:livebook, :default_runtime, default_runtime} | config])
-  end
-
-  defp opts_to_config([{:data_path, path} | opts], config) do
-    data_path = Livebook.Config.writable_dir!("--data-path", path)
-    opts_to_config(opts, [{:livebook, :data_path, data_path} | config])
   end
 
   defp opts_to_config([_opt | opts], config), do: opts_to_config(opts, config)
@@ -284,13 +235,6 @@ defmodule LivebookCLI.Server do
     url
     |> URI.parse()
     |> Map.put(:path, path)
-    |> URI.to_string()
-  end
-
-  defp update_query(url, params) do
-    url
-    |> URI.parse()
-    |> Livebook.Utils.append_query(URI.encode_query(params))
     |> URI.to_string()
   end
 

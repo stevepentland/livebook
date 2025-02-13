@@ -1,11 +1,9 @@
 defmodule Livebook.Notebook.Cell do
-  @moduledoc false
-
   # Data structure representing a single cell in a notebook.
   #
-  # A cell is the smallest unit of work in a notebook.
-  # It may consist of text content, outputs, rendered content
-  # and other special forms.
+  # Cell is the smallest structural unit in a notebook, in other words
+  # it is a block. Depending on the cell type, it may consist of text
+  # content, outputs or a specific UI.
 
   alias Livebook.Utils
   alias Livebook.Notebook.Cell
@@ -49,24 +47,46 @@ defmodule Livebook.Notebook.Cell do
   def evaluable?(_cell), do: false
 
   @doc """
-  Extracts all inputs from the given output.
+  Extracts all inputs from the given indexed output.
   """
-  @spec find_inputs_in_output(indexed_output()) :: list(input_attrs :: map())
+  @spec find_inputs_in_output(indexed_output()) :: list(Livebook.Runtime.input_output())
   def find_inputs_in_output(output)
 
-  def find_inputs_in_output({_idx, {:input, attrs}}) do
-    [attrs]
+  def find_inputs_in_output({_idx, %{type: :input} = input}) do
+    [input]
   end
 
-  def find_inputs_in_output({_idx, {:control, %{type: :form, fields: fields}}}) do
-    Keyword.values(fields)
+  def find_inputs_in_output({_idx, %{type: :control, attrs: %{type: :form, fields: fields}}}) do
+    for {_field, input} <- fields, input != nil, do: input
   end
 
-  def find_inputs_in_output({_idx, {:frame, outputs, _}}) do
-    Enum.flat_map(outputs, &find_inputs_in_output/1)
+  def find_inputs_in_output({_idx, output}) when output.type in [:frame, :tabs, :grid] do
+    Enum.flat_map(output.outputs, &find_inputs_in_output/1)
+  end
+
+  def find_inputs_in_output({_idx, %{type: :frame_update, update: {_update_type, new_outputs}}}) do
+    Enum.flat_map(new_outputs, &find_inputs_in_output/1)
   end
 
   def find_inputs_in_output(_output), do: []
+
+  @doc """
+  Extracts all asset infos from the given non-indexed output.
+  """
+  @spec find_assets_in_output(Livebook.Runtime.output()) :: list(asset_info :: map())
+  def find_assets_in_output(output)
+
+  def find_assets_in_output(%{type: :js} = output), do: [output.js_view.assets]
+
+  def find_assets_in_output(output) when output.type in [:frame, :tabs, :grid] do
+    Enum.flat_map(output.outputs, &find_assets_in_output/1)
+  end
+
+  def find_assets_in_output(%{type: :frame_update, update: {_update_type, new_outputs}}) do
+    Enum.flat_map(new_outputs, &find_assets_in_output/1)
+  end
+
+  def find_assets_in_output(_output), do: []
 
   @setup_cell_id "setup"
 

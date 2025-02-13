@@ -1,36 +1,23 @@
 defmodule LivebookWeb do
-  @moduledoc false
+  def static_paths, do: ~w(assets images favicons robots.txt)
 
   def controller do
     quote do
-      use Phoenix.Controller, namespace: LivebookWeb
+      use Phoenix.Controller,
+        formats: [:html, :json],
+        layouts: [html: LivebookWeb.Layouts]
 
       import Plug.Conn
-      alias LivebookWeb.Router.Helpers, as: Routes
-    end
-  end
 
-  def view do
-    quote do
-      use Phoenix.View,
-        root: "lib/livebook_web/templates",
-        namespace: LivebookWeb
-
-      # Import convenience functions from controllers
-      import Phoenix.Controller,
-        only: [get_flash: 1, get_flash: 2, view_module: 1, view_template: 1]
-
-      # Include shared imports and aliases for views
-      unquote(view_helpers())
+      unquote(verified_routes())
     end
   end
 
   def live_view do
     quote do
-      use Phoenix.LiveView,
-        layout: {LivebookWeb.LayoutView, "live.html"}
+      use Phoenix.LiveView, layout: {LivebookWeb.Layouts, :live}
 
-      unquote(view_helpers())
+      unquote(html_helpers())
     end
   end
 
@@ -38,13 +25,13 @@ defmodule LivebookWeb do
     quote do
       use Phoenix.LiveComponent
 
-      unquote(view_helpers())
+      unquote(html_helpers())
     end
   end
 
   def router do
     quote do
-      use Phoenix.Router
+      use Phoenix.Router, helpers: false
 
       import Plug.Conn
       import Phoenix.Controller
@@ -52,22 +39,49 @@ defmodule LivebookWeb do
     end
   end
 
-  defp view_helpers do
+  def html do
     quote do
-      # Use all HTML functionality (forms, tags, etc)
-      use Phoenix.HTML
+      use Phoenix.Component
 
-      # Import LiveView helpers (live_render, live_component, live_patch, etc)
-      import Phoenix.LiveView.Helpers
+      # Import convenience functions from controllers
+      import Phoenix.Controller,
+        only: [get_csrf_token: 0, view_module: 1, view_template: 1]
 
-      # Import basic rendering functionality (render, render_layout, etc)
-      import Phoenix.View
+      # Include general helpers for rendering HTML
+      unquote(html_helpers())
+    end
+  end
+
+  defp html_helpers do
+    quote do
+      # HTML escaping functionality
+      import Phoenix.HTML
+
+      # Core UI components
+      import LivebookWeb.CoreComponents
+      import LivebookWeb.FormComponents
+      import LivebookWeb.Confirm
+
+      # Shortcut for generating JS commands
       alias Phoenix.LiveView.JS
-      alias LivebookWeb.Router.Helpers, as: Routes
 
-      # Custom helpers
-      import LivebookWeb.Helpers
-      import LivebookWeb.LiveHelpers
+      # Routes generation with the ~p sigil
+      unquote(verified_routes())
+    end
+  end
+
+  def verified_routes do
+    quote do
+      use Phoenix.VerifiedRoutes,
+        endpoint: LivebookWeb.Endpoint,
+        router: LivebookWeb.Router,
+        statics: LivebookWeb.static_paths()
+
+      # We don't know the hostname Livebook runs on, so we don't use
+      # absolute URL helpers. We don't import sigil_p either, because
+      # we override it.
+      import Phoenix.VerifiedRoutes, only: []
+      import LivebookWeb.VerifiedRoutes, only: [sigil_p: 2]
     end
   end
 

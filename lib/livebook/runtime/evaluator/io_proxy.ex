@@ -1,6 +1,4 @@
 defmodule Livebook.Runtime.Evaluator.IOProxy do
-  @moduledoc false
-
   # An IO device process used by `Evaluator` as the group leader.
   #
   # The process implements [the Erlang I/O Protocol](https://erlang.org/doc/apps/stdlib/io_protocol.html)
@@ -23,80 +21,143 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
   @doc """
   Starts an IO device process.
 
-  Make sure to use `configure/3` to correctly proxy the requests.
-  """
-  @spec start_link(pid(), pid(), pid(), pid()) :: GenServer.on_start()
-  def start_link(evaluator, send_to, runtime_broadcast_to, object_tracker) do
-    GenServer.start_link(__MODULE__, {evaluator, send_to, runtime_broadcast_to, object_tracker})
-  end
-
-  @doc """
-  Sets IO proxy destination and the reference to be attached to all
-  messages.
-
   For all supported requests a message is sent to the configured
-  `:send_to` process, so this device serves as a proxy. The given
-  evaluation reference is also included in all messages.
+  `:send_to` process, so this device serves as a proxy.
   """
-  @spec configure(pid(), Evaluator.ref()) :: :ok
-  def configure(pid, ref) do
-    GenServer.cast(pid, {:configure, ref})
+  @spec start(%{
+          evaluator: pid(),
+          send_to: pid(),
+          runtime_broadcast_to: pid(),
+          object_tracker: pid(),
+          client_tracker: pid(),
+          ebin_path: String.t() | nil,
+          tmp_dir: String.t() | nil
+        }) :: GenServer.on_start()
+  def start(args) do
+    GenServer.start(__MODULE__, args)
   end
 
   @doc """
-  Synchronously clears the buffered output and sends it to the
-  configured `:send_to` process.
+  Linking version of `start/4`.
   """
-  @spec flush(pid()) :: :ok
-  def flush(pid) do
-    GenServer.call(pid, :flush)
+  def start_link(args) do
+    GenServer.start_link(__MODULE__, args)
   end
 
   @doc """
-  Asynchronously clears all cached inputs, so on next read they
-  are requested again.
+  Configures IO proxy for a new evaluation.
+
+  The given reference is attached to all the proxied messages.
   """
-  @spec clear_input_cache(pid()) :: :ok
-  def clear_input_cache(pid) do
-    GenServer.cast(pid, :clear_input_cache)
+  @spec before_evaluation(pid(), Evaluator.ref(), String.t()) :: :ok
+  def before_evaluation(pid, ref, file) do
+    GenServer.cast(pid, {:before_evaluation, ref, file})
   end
 
   @doc """
-  Returns the accumulated widget pids and clears the accumulator.
+  Flushes any buffered output and returns gathered metadata.
   """
-  @spec flush_widgets(pid()) :: MapSet.t(pid())
-  def flush_widgets(pid) do
-    GenServer.call(pid, :flush_widgets)
+  @spec after_evaluation(pid()) :: %{tracer_info: Evaluator.Tracer.t()}
+  def after_evaluation(pid) do
+    GenServer.call(pid, :after_evaluation)
+  end
+
+  @doc """
+  Updates tracer info.
+  """
+  @spec tracer_updates(pid(), list()) :: :ok
+  def tracer_updates(pid, updates) do
+    GenServer.cast(pid, {:tracer_updates, updates})
+  end
+
+  @doc """
+  Checks if the given process is a IO proxy.
+
+  The check happens against the process dictionary.
+  """
+  def io_proxy?(pid) do
+    process_get_key(pid, :io_proxy) == true
+  end
+
+  defp process_get_key(pid, key) do
+    try do
+      case Process.info(pid, {:dictionary, key}) do
+        {{:dictionary, ^key}, :undefined} -> nil
+        {{:dictionary, ^key}, value} -> value
+        nil -> nil
+      end
+    rescue
+      # TODO: remove error handler once we require OTP 26.2
+      _ -> Process.info(pid, [:dictionary])[:dictionary][key]
+    end
   end
 
   @impl true
-  def init({evaluator, send_to, runtime_broadcast_to, object_tracker}) do
+  def init(args) do
+    %{
+      evaluator: evaluator,
+      send_to: send_to,
+      runtime_broadcast_to: runtime_broadcast_to,
+      object_tracker: object_tracker,
+      client_tracker: client_tracker,
+      ebin_path: ebin_path,
+      tmp_dir: tmp_dir
+    } = args
+
+    evaluator_monitor = Process.monitor(evaluator)
+
+    Process.put(:io_proxy, true)
+
     {:ok,
      %{
+       evaluator_monitor: evaluator_monitor,
        encoding: :unicode,
        ref: nil,
+       file: nil,
        buffer: [],
        input_cache: %{},
        token_count: 0,
        evaluator: evaluator,
        send_to: send_to,
        runtime_broadcast_to: runtime_broadcast_to,
-       object_tracker: object_tracker
+       object_tracker: object_tracker,
+       client_tracker: client_tracker,
+       ebin_path: ebin_path,
+       tmp_dir: tmp_dir,
+       tracer_info: %Evaluator.Tracer{},
+       modules_defined: MapSet.new()
      }}
   end
 
   @impl true
-  def handle_cast({:configure, ref}, state) do
-    {:noreply, %{state | ref: ref, token_count: 0}}
+  def handle_cast({:before_evaluation, ref, file}, state) do
+    {:noreply,
+     %{
+       state
+       | ref: ref,
+         file: file,
+         token_count: 0,
+         input_cache: %{},
+         tracer_info: %Evaluator.Tracer{}
+     }}
   end
 
-  def handle_cast(:clear_input_cache, state) do
-    {:noreply, %{state | input_cache: %{}}}
+  def handle_cast({:tracer_updates, updates}, state) do
+    state = update_in(state.tracer_info, &Evaluator.Tracer.apply_updates(&1, updates))
+
+    modules_defined =
+      for {:module_defined, module, _vars, _line} <- updates,
+          into: state.modules_defined,
+          do: module
+
+    {:noreply, %{state | modules_defined: modules_defined}}
   end
 
   @impl true
-  def handle_call(:flush, _from, state) do
-    {:reply, :ok, flush_buffer(state)}
+  def handle_call(:after_evaluation, _from, state) do
+    state = flush_buffer(state)
+    info = %{tracer_info: state.tracer_info}
+    {:reply, info, state}
   end
 
   @impl true
@@ -108,6 +169,19 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
 
   def handle_info(:flush, state) do
     {:noreply, flush_buffer(state)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state)
+      when ref == state.evaluator_monitor do
+    cleanup(state)
+    {:stop, reason, state}
+  end
+
+  defp cleanup(state) do
+    # Remove all modules defined during evaluation
+    for module <- state.modules_defined, function_exported?(module, :module_info, 1) do
+      Evaluator.delete_module(module, state.ebin_path)
+    end
   end
 
   defp io_request({:put_chars, chars} = req, state) do
@@ -189,6 +263,24 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
     {:ok, state}
   end
 
+  defp io_request({:livebook_put_output_to, client_id, output}, state) do
+    state = flush_buffer(state)
+    send(state.send_to, {:runtime_evaluation_output_to, client_id, state.ref, output})
+    {:ok, state}
+  end
+
+  defp io_request({:livebook_put_output_to_clients, output}, state) do
+    state = flush_buffer(state)
+    send(state.send_to, {:runtime_evaluation_output_to_clients, state.ref, output})
+    {:ok, state}
+  end
+
+  defp io_request({:livebook_doctest_report, doctest_report}, state) do
+    send(state.send_to, {:runtime_doctest_report, state.ref, doctest_report})
+    {:ok, state}
+  end
+
+  # This request is used by Kino <= 0.13.1
   defp io_request({:livebook_get_input_value, input_id}, state) do
     input_cache =
       Map.put_new_lazy(state.input_cache, input_id, fn ->
@@ -196,6 +288,66 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
       end)
 
     {input_cache[input_id], %{state | input_cache: input_cache}}
+  end
+
+  defp io_request({:livebook_get_input_value, input_id, pid}, state) do
+    # We only allow reading the input value from the evaluator process,
+    # to make sure the cell is still evaluating. A different process
+    # could attempt to read the value after the cell evaluation was
+    # finished, in which case we could return a cached value from a
+    # different evaluation and we would not track the read properly.
+
+    if pid == state.evaluator do
+      input_cache =
+        Map.put_new_lazy(state.input_cache, input_id, fn ->
+          request_input_value(input_id, state)
+        end)
+
+      {input_cache[input_id], %{state | input_cache: input_cache}}
+    else
+      {{:error, :bad_process}, state}
+    end
+  end
+
+  defp io_request({:livebook_get_file_path, file_id}, state) do
+    # We could cache forever, but we don't want the cache to pile up
+    # indefinitely, so we just reuse the input cache which is cleared
+    # for ever evaluation
+
+    cache_id = {:file_path, file_id}
+
+    input_cache =
+      Map.put_new_lazy(state.input_cache, cache_id, fn ->
+        request_file_path(file_id, state)
+      end)
+
+    {input_cache[cache_id], %{state | input_cache: input_cache}}
+  end
+
+  defp io_request({:livebook_get_file_entry_path, name}, state) do
+    # Same as above as for caching
+
+    cache_id = {:file_entry_path, name}
+
+    input_cache =
+      Map.put_new_lazy(state.input_cache, cache_id, fn ->
+        request_file_entry_path(name, state)
+      end)
+
+    {input_cache[cache_id], %{state | input_cache: input_cache}}
+  end
+
+  defp io_request({:livebook_get_file_entry_spec, name}, state) do
+    # Same as above as for caching
+
+    cache_id = {:file_entry_spec, name}
+
+    input_cache =
+      Map.put_new_lazy(state.input_cache, cache_id, fn ->
+        request_file_entry_spec(name, state)
+      end)
+
+    {input_cache[cache_id], %{state | input_cache: input_cache}}
   end
 
   # Token is a unique, reevaluation-safe opaque identifier
@@ -221,13 +373,68 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
     {:ok, state}
   end
 
+  # Used until Kino v0.7
   defp io_request({:livebook_monitor_object, object, destination, payload}, state) do
-    reply = Evaluator.ObjectTracker.monitor(state.object_tracker, object, destination, payload)
+    io_request({:livebook_monitor_object, object, destination, payload, false}, state)
+  end
+
+  defp io_request({:livebook_monitor_object, object, destination, payload, ack?}, state) do
+    reply =
+      Evaluator.ObjectTracker.monitor(state.object_tracker, object, destination, payload, ack?)
+
     {reply, state}
   end
 
   defp io_request(:livebook_get_broadcast_target, state) do
     {{:ok, state.runtime_broadcast_to}, state}
+  end
+
+  defp io_request(:livebook_get_evaluation_file, state) do
+    {state.file, state}
+  end
+
+  defp io_request(:livebook_get_app_info, state) do
+    result = request_app_info(state)
+    {result, state}
+  end
+
+  defp io_request(:livebook_get_tmp_dir, state) do
+    result =
+      with tmp_dir when is_binary(tmp_dir) <- state.tmp_dir,
+           :ok <- File.mkdir_p(tmp_dir) do
+        {:ok, state.tmp_dir}
+      else
+        _ -> {:error, :not_available}
+      end
+
+    {result, state}
+  end
+
+  defp io_request(:livebook_get_beam_paths, state) do
+    result =
+      with ebin_path when is_binary(ebin_path) <- state.ebin_path,
+           :ok <- File.mkdir_p(ebin_path) do
+        {:ok, [state.ebin_path]}
+      else
+        _ -> {:error, :not_available}
+      end
+
+    {result, state}
+  end
+
+  defp io_request({:livebook_monitor_clients, pid}, state) do
+    client_ids = Evaluator.ClientTracker.monitor_clients(state.client_tracker, pid)
+    {{:ok, client_ids}, state}
+  end
+
+  defp io_request({:livebook_get_user_info, client_id}, state) do
+    result = request_user_info(client_id, state)
+    {result, state}
+  end
+
+  defp io_request({:livebook_get_proxy_handler_child_spec, fun}, state) do
+    result = {Livebook.Proxy.Handler, listen: fun}
+    {result, state}
   end
 
   defp io_request(_, state) do
@@ -259,18 +466,60 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
   end
 
   defp request_input_value(input_id, state) do
-    send(state.send_to, {:runtime_evaluation_input, state.ref, self(), input_id})
+    request = {:runtime_evaluation_input_request, state.ref, self(), input_id}
+    reply_tag = :runtime_evaluation_input_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag) do
+      with :error <- reply, do: {:error, :not_found}
+    end
+  end
+
+  defp request_file_path(file_id, state) do
+    request = {:runtime_file_path_request, self(), file_id}
+    reply_tag = :runtime_file_path_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag) do
+      with :error <- reply, do: {:error, :not_found}
+    end
+  end
+
+  defp request_file_entry_path(name, state) do
+    request = {:runtime_file_entry_path_request, self(), name}
+    reply_tag = :runtime_file_entry_path_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag), do: reply
+  end
+
+  defp request_file_entry_spec(name, state) do
+    request = {:runtime_file_entry_spec_request, self(), name}
+    reply_tag = :runtime_file_entry_spec_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag), do: reply
+  end
+
+  defp request_app_info(state) do
+    request = {:runtime_app_info_request, self()}
+    reply_tag = :runtime_app_info_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag), do: reply
+  end
+
+  defp request_user_info(client_id, state) do
+    request = {:runtime_user_info_request, self(), client_id}
+    reply_tag = :runtime_user_info_reply
+
+    with {:ok, reply} <- runtime_request(state, request, reply_tag), do: reply
+  end
+
+  defp runtime_request(state, request, reply_tag) do
+    send(state.send_to, request)
 
     ref = Process.monitor(state.send_to)
 
     receive do
-      {:runtime_evaluation_input_reply, {:ok, value}} ->
+      {^reply_tag, reply} ->
         Process.demonitor(ref, [:flush])
-        {:ok, value}
-
-      {:runtime_evaluation_input_reply, :error} ->
-        Process.demonitor(ref, [:flush])
-        {:error, :not_found}
+        {:ok, reply}
 
       {:DOWN, ^ref, :process, _object, _reason} ->
         {:error, :terminated}
@@ -285,7 +534,8 @@ defmodule Livebook.Runtime.Evaluator.IOProxy do
     string = state.buffer |> Enum.reverse() |> Enum.join()
 
     if state.send_to != nil and string != "" do
-      send(state.send_to, {:runtime_evaluation_output, state.ref, {:stdout, string}})
+      output = %{type: :terminal_text, text: string, chunk: true}
+      send(state.send_to, {:runtime_evaluation_output, state.ref, output})
     end
 
     %{state | buffer: []}

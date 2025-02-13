@@ -1,5 +1,5 @@
 defmodule Livebook.Session.FileGuardTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   import Livebook.TestHelpers
 
@@ -33,7 +33,7 @@ defmodule Livebook.Session.FileGuardTest do
     assert :ok = FileGuard.lock(file, self())
   end
 
-  test "file is automatically unloacked when the owner process termiantes" do
+  test "file is automatically unloacked when the owner process terminates" do
     file = FileSystem.File.local(p("/some/path"))
 
     owner = spawn(fn -> :ok end)

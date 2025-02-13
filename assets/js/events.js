@@ -1,4 +1,7 @@
 import topbar from "topbar";
+import scrollIntoView from "scroll-into-view-if-needed";
+
+import { waitUntilVisible } from "./lib/utils";
 
 export function registerTopbar() {
   topbar.config({
@@ -6,17 +9,11 @@ export function registerTopbar() {
     shadowColor: "rgba(0, 0, 0, .3)",
   });
 
-  let topBarScheduled = null;
-
   window.addEventListener("phx:page-loading-start", () => {
-    if (!topBarScheduled) {
-      topBarScheduled = setTimeout(() => topbar.show(), 500);
-    }
+    topbar.show(500);
   });
 
   window.addEventListener("phx:page-loading-stop", () => {
-    clearTimeout(topBarScheduled);
-    topBarScheduled = null;
     topbar.hide();
   });
 }
@@ -49,27 +46,66 @@ export function registerGlobalEventHandlers() {
 
   window.addEventListener("lb:clipcopy", (event) => {
     if ("clipboard" in navigator) {
-      const text = event.target.textContent;
-      navigator.clipboard.writeText(text);
+      if (event.detail.content) {
+        navigator.clipboard.writeText(event.detail.content);
+      } else if (event.target.tagName === "INPUT") {
+        navigator.clipboard.writeText(event.target.value);
+      } else {
+        navigator.clipboard.writeText(event.target.textContent);
+      }
     } else {
       alert(
-        "Sorry, your browser does not support clipboard copy.\nThis generally requires a secure origin — either HTTPS or localhost."
+        "Sorry, your browser does not support clipboard copy.\nThis generally requires a secure origin — either HTTPS or localhost.",
       );
     }
   });
 
+  window.addEventListener("lb:scroll_into_view", (event) => {
+    const options = event.detail || {};
+
+    // If the element is going to be shown, we want to wait for that
+    waitUntilVisible(event.target).then(() => {
+      scrollIntoView(event.target, {
+        scrollMode: "if-needed",
+        behavior: "smooth",
+        block: "nearest",
+        inline: "nearest",
+        ...options,
+      });
+    });
+  });
+
+  window.addEventListener("phx:lb:exec_js", (event) => {
+    const selector = event.detail.to || "body";
+
+    document.querySelectorAll(selector).forEach((element) => {
+      window.liveSocket.execJS(element, event.detail.js);
+    });
+  });
+
   window.addEventListener("lb:session_list:on_selection_change", () => {
     const anySessionSelected = !!document.querySelector(
-      "[name='session_ids[]']:checked"
+      "[name='session_ids[]']:checked",
     );
     const disconnect = document.querySelector(
-      "#edit-sessions [name='disconnect']"
+      "#edit-sessions [name='disconnect']",
     );
     const closeAll = document.querySelector(
-      "#edit-sessions [name='close_all']"
+      "#edit-sessions [name='close_all']",
     );
-    disconnect.disabled = !anySessionSelected;
-    closeAll.disabled = !anySessionSelected;
+    disconnect.parentElement.classList.toggle(
+      "pointer-events-none",
+      !anySessionSelected,
+    );
+    disconnect.parentElement.classList.toggle(
+      "opacity-50",
+      !anySessionSelected,
+    );
+    closeAll.parentElement.classList.toggle(
+      "pointer-events-none",
+      !anySessionSelected,
+    );
+    closeAll.parentElement.classList.toggle("opacity-50", !anySessionSelected);
   });
 
   window.addEventListener("contextmenu", (event) => {
@@ -77,7 +113,45 @@ export function registerGlobalEventHandlers() {
 
     if (target) {
       event.preventDefault();
+      // LV dispatches phx-click to the target of the preceding mousedown event
+      target.dispatchEvent(new Event("mousedown", { bubbles: true }));
       target.dispatchEvent(new Event("click", { bubbles: true }));
     }
   });
+
+  // Ignore submit events on elements with phx-nosubmit
+  window.addEventListener(
+    "submit",
+    (event) => {
+      if (event.target.hasAttribute("phx-nosubmit")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    { capture: true },
+  );
+}
+
+/**
+ * Disables the auto-zoom behavior when focusing an input on a touch device.
+ *
+ * It is important that this should not prevent users from manually
+ * zooming if they wish. There isn't a portable solution to this
+ * problem, so this hook is a no-op if the detected device is not
+ * known to behave well.
+ *
+ * See: https://stackoverflow.com/questions/2989263/disable-auto-zoom-in-input-text-tag-safari-on-iphone
+ */
+export function disableZoomOnInputFocus() {
+  const isWebKit = /AppleWebKit/.test(navigator.userAgent);
+  const isTouchScreen =
+    "ontouchstart" in window || navigator.maxTouchPoints > 0;
+
+  if (isWebKit && isTouchScreen) {
+    const viewportTag = document.querySelector("meta[name='viewport']");
+
+    if (viewportTag) {
+      viewportTag.content += ", maximum-scale=1.0";
+    }
+  }
 }

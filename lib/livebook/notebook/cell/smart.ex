@@ -1,26 +1,41 @@
 defmodule Livebook.Notebook.Cell.Smart do
-  @moduledoc false
+  # A cell with evaluable code that is edited through a dedicated UI.
+  #
+  # Smart cell is supposed to provide the user with an easy, code-free
+  # way to achieve a specific task, such as plotting a chart or querying
+  # a database. The user interacts with smart cell through UI, while
+  # the smart cell generates plain code to be executed. The user can
+  # access and take over the underlying code at any point.
+  #
+  # The available smart cells come from the runtime, therefore they
+  # are one of Livebook's extension points.
 
-  # A cell with Elixir code that is edited through a dedicated UI.
-
-  defstruct [:id, :source, :outputs, :kind, :attrs, :js_view, :editor]
+  defstruct [
+    :id,
+    :source,
+    :chunks,
+    :outputs,
+    :kind,
+    :attrs,
+    :js_view,
+    :editor
+  ]
 
   alias Livebook.Utils
   alias Livebook.Notebook.Cell
 
   @type t :: %__MODULE__{
           id: Cell.id(),
-          source: String.t(),
+          source: String.t() | :__pruned__,
+          chunks: Livebook.Runtime.chunks() | nil,
           outputs: list(Cell.indexed_output()),
-          kind: String.t(),
-          attrs: attrs(),
+          kind: String.t() | nil,
+          attrs: attrs() | :__pruned__,
           js_view: Livebook.Runtime.js_view() | nil,
-          editor: editor() | nil
+          editor: Livebook.Runtime.editor() | nil
         }
 
   @type attrs :: map()
-
-  @type editor :: %{language: String.t(), placement: :bottom | :top, source: String.t()}
 
   @doc """
   Returns an empty cell.
@@ -30,6 +45,7 @@ defmodule Livebook.Notebook.Cell.Smart do
     %__MODULE__{
       id: Utils.random_id(),
       source: "",
+      chunks: nil,
       outputs: [],
       kind: nil,
       attrs: %{},
